@@ -61,7 +61,11 @@ class FakeMesh:
                     ok = n not in mesh.reject
                     return CommandResult(0, '{"valid": %s}' % ("true" if ok else "false"), "")
                 if "aredn_sysupgrade" in cmd:
-                    mesh.reboot_polls[n] = 3
+                    assert "nohup" not in cmd          # AREDN's BusyBox has no nohup
+                    if n not in getattr(mesh, "launch_log", {}):
+                        mesh.reboot_polls[n] = 3
+                if cmd.startswith("cat /tmp/aredn-fleet-upgrade.log"):
+                    return CommandResult(0, getattr(mesh, "launch_log", {}).get(n, ""), "")
                 if cmd.startswith("ucode -e 'import * as r"):
                     return CommandResult(0, json.dumps({"config": mesh.radios.get(n, [radio5()])}), "")
                 if "radio-and-antenna" in cmd:
@@ -339,3 +343,29 @@ def test_rc_station_check_uses_its_real_access_point(tmp_path):
     guessed = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, cfg, sleep=no_sleep))
     r = guessed.results[0]
     assert r.status == "failed" and "other runs 4.26.1.0" in r.detail and "read radios" in r.detail
+
+
+def test_launch_that_never_starts_fails_fast_and_cleans_up(tmp_path):
+    t = Topology()
+    t.add_link("hub", "a")
+    mesh = FakeMesh(t)
+    mesh.launch_log = {"a": "ash: nohup: not found\n"}
+    rel, store = release_and_store(tmp_path / "fw")
+    rep = run(run_rollout(plan_rollout(t, "hub", ["a"]), rel, store, mesh.connect, mesh.sysinfo,
+                          CFG, execute=True, sleep=no_sleep))
+    r = rep.results[0]
+    assert r.status == "failed" and "not found" in r.detail and "unchanged" in r.detail
+    assert any(c.startswith("rm -f /tmp/aredn-fleet-upgrade.bin") for _, c in mesh.commands)
+
+
+def test_detached_runs_under_posix_sh(tmp_path):
+    import subprocess
+    import time
+    from aredn_fleet.transport import detached
+    log = tmp_path / "out.log"
+    subprocess.run(["sh", "-c", detached("echo started", str(log))], check=True, timeout=10)
+    for _ in range(50):
+        if log.exists() and log.read_text().strip():
+            break
+        time.sleep(0.05)
+    assert log.read_text().strip() == "started"

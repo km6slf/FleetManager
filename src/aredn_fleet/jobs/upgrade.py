@@ -30,12 +30,13 @@ from ..firmware import FirmwareStore, Release, match_profile
 from ..rc import at_least_4267, ipq40xx_freeze_note, removed_channel_conflict, station_radios
 from .radio import read_node_radios
 from ..topology import Plan
-from ..transport import NodeSession
+from ..transport import NodeSession, detached
 
 SysinfoFetch = Callable[[str], Awaitable[dict[str, Any] | None]]
 Connector = Callable[[str], Awaitable[NodeSession]]
 
 REMOTE_IMAGE = "/tmp/aredn-fleet-upgrade.bin"
+UPGRADE_LOG = "/tmp/aredn-fleet-upgrade.log"
 
 
 @dataclass
@@ -183,6 +184,13 @@ class NodeUpgrade:
 
         meminfo = (await s.run("cat /proc/meminfo")).stdout
         avail = _kb(meminfo, "MemAvailable:") or _kb(meminfo, "MemFree:")
+        # A copy left in /tmp by an earlier failed run is overwritten, so its RAM counts as free.
+        try:
+            leftover = int((await s.run(f"wc -c < {REMOTE_IMAGE} 2>/dev/null")).stdout.strip() or 0)
+        except (ValueError, AttributeError):
+            leftover = 0
+        if avail:
+            avail += leftover // 1024
         need = image.size // 1024 + self.cfg.ram_margin_kb
         if avail and avail < need:
             return self._fail(res, f"not enough RAM for image in /tmp: {avail} kB free, need {need} kB")
@@ -221,23 +229,30 @@ class NodeUpgrade:
 
         neighbours = _neighbours(before)
         self.log(self.node, "sysupgrade", neighbours=sorted(neighbours), validated=valid)
-        await s.run(f"nohup {self.cfg.sysupgrade_cmd} {REMOTE_IMAGE} "
-                    f">/tmp/aredn-fleet-upgrade.log 2>&1 </dev/null &", timeout=30)
+        await s.run(detached(f"{self.cfg.sysupgrade_cmd} {REMOTE_IMAGE}", UPGRADE_LOG), timeout=30)
 
         # aredn_sysupgrade backs up the config (it stops babel first) before
-        # flashing. A failure there prints "ERROR:" and exits; catch it while
-        # the SSH session still works.
+        # flashing. A failure there prints "ERROR:" and exits; catch it, or a
+        # launch that never started, while the SSH session still works.
         await self.sleep(self.cfg.launch_check_seconds)
         try:
-            log = (await s.run("cat /tmp/aredn-fleet-upgrade.log", timeout=10)).stdout
+            log = (await s.run(f"cat {UPGRADE_LOG}", timeout=10)).stdout
         except Exception:  # noqa: BLE001 - node already going down is the normal case
             log = ""
-        if "ERROR" in log:
-            return self._fail(res, f"aredn_sysupgrade failed: {log.strip()[:300]} "
-                                   "(babel may be stopped; node may need a reboot)")
+        if _launch_failed(log):
+            stopped = "ERROR" in log
+            try:
+                await s.run(f"rm -f {REMOTE_IMAGE}", timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
+            return self._fail(res, f"aredn_sysupgrade failed: {log.strip()[:300]}"
+                                   + (" (babel may be stopped; node may need a reboot)" if stopped
+                                      else " (nothing was flashed; the node is unchanged)"))
 
+        self.log(self.node, "launched", log=log.strip()[-500:])
         if not await self._wait(lambda si: si is None, self.cfg.down_timeout):
-            return self._fail(res, "node never went down; check /tmp/aredn-fleet-upgrade.log on the node")
+            return self._fail(res, "node never went down, so the upgrade didn't run to the flash. "
+                                   + await self._node_upgrade_log())
         self.log(self.node, "down")
 
         if not await self._wait(lambda si: si is not None, self.cfg.up_timeout):
@@ -325,6 +340,22 @@ class NodeUpgrade:
         except Exception:  # noqa: BLE001 - not worth failing a good upgrade over
             self.log(self.node, "radio-reread-failed")
 
+    async def _node_upgrade_log(self) -> str:
+        """What aredn_sysupgrade said, for a failure message (best effort, read-only)."""
+        try:
+            s = await self.connect(self.node)
+            try:
+                out = (await s.run(f"cat {UPGRADE_LOG} 2>&1; echo; "
+                                   f"ls -l {REMOTE_IMAGE} 2>&1; "
+                                   "ps w | grep -E 'sysupgrade' | grep -v grep", timeout=15)).stdout
+            finally:
+                await s.close()
+        except Exception as exc:  # noqa: BLE001
+            return f"(couldn't read the node's upgrade log: {exc})"
+        out = " | ".join(x.strip() for x in out.splitlines() if x.strip())
+        self.log(self.node, "upgrade-log", text=out[-2000:])
+        return f"Node's upgrade log: {out[-600:] or '(empty)'}"
+
     async def _wait(self, pred: Callable[[Any], bool], timeout: float) -> bool:
         async def apred(si):
             return pred(si)
@@ -338,6 +369,12 @@ class NodeUpgrade:
             if self.clock() >= deadline:
                 return False
             await self.sleep(self.cfg.poll_interval)
+
+
+def _launch_failed(log: str) -> bool:
+    """The upgrade log shows it never got going (missing command, script error)."""
+    return any(s in log for s in ("ERROR", "not found", "No such file", "Permission denied",
+                                  "can't execute"))
 
 
 @dataclass

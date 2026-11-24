@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 import secrets
 from dataclasses import asdict
 from pathlib import Path
@@ -536,6 +537,26 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             raise HTTPException(404, "no such job")
         return {**j.summary(), "events": j.events[since:], "next": len(j.events),
                 "result": j.result if j.status != "running" else None}
+
+    @app.get("/api/jobs/{job_id}/log.txt")
+    async def job_text(job_id: str):
+        from fastapi.responses import PlainTextResponse
+        j = state.jobs.jobs.get(job_id)
+        if not j:
+            raise HTTPException(404, "no such job")
+        return PlainTextResponse(j.text())
+
+    @app.post("/api/jobs/{job_id}/save")
+    async def job_save(job_id: str):
+        """Write the log to the logs folder now and, on Windows, show it in Explorer."""
+        j = state.jobs.jobs.get(job_id)
+        if not j:
+            raise HTTPException(404, "no such job")
+        path = state.jobs.save_log(j)
+        if path and sys.platform == "win32":
+            import subprocess
+            subprocess.Popen(["explorer", "/select,", str(path)])  # noqa: S603,S607
+        return {"path": str(path) if path else None}
 
     @app.post("/api/jobs/{job_id}/stop")
     async def job_stop(job_id: str):

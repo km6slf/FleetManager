@@ -660,6 +660,16 @@ function followJob(id, { onDone, switchTab = true, quiet = false } = {}) {
     const st = $("#job-status");
     st.textContent = j.status + (j.stop_requested && j.status === "running" ? " (stopping)" : "");
     st.className = "badge " + j.status;
+    $("#btn-log-copy").disabled = $("#btn-log-save").disabled = false;
+    $("#btn-log-copy").onclick = () => guarded(async () => {
+      const r = await fetch(`/api/jobs/${id}/log.txt`, { credentials: "same-origin" });
+      await copyText(await r.text());
+      toast("Log copied to the clipboard");
+    });
+    $("#btn-log-save").onclick = () => guarded(async () => {
+      const r = await api(`/api/jobs/${id}/save`, { method: "POST" });
+      toast(`Saved to ${r.path}`);
+    });
     $("#btn-stop").classList.toggle("hidden", j.status !== "running");
     $("#btn-stop").onclick = () => guarded(() => api(`/api/jobs/${id}/stop`, { method: "POST" }));
     loadJobs();
@@ -688,3 +698,13 @@ function followJob(id, { onDone, switchTab = true, quiet = false } = {}) {
   const want = location.hash.slice(1);
   if (want && $(`#tab-${want}`)) showTab(want);
 })();
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return; } catch (_) { /* fall back below */ }
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  if (!ok) throw new Error("couldn't reach the clipboard; use Save log… instead");
+}

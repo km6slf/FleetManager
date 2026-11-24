@@ -332,3 +332,24 @@ def test_radio_details_go_stale_when_firmware_changes(client):
     assert node()["radios_stale"] is True
     o = client.post("/api/radio/options", json={"nodes": ["far1"]}).json()
     assert o["stale"] == ["far1"] and o["missing"] == ["far1"] and o["bands"] == []
+
+
+def test_job_log_text_save_and_autosave(tmp_path):
+    import asyncio
+    from aredn_fleet.web.state import JobManager
+
+    async def go():
+        jm = JobManager(tmp_path / "jobs")
+
+        async def body(job):
+            job.log("hello")
+            raise RuntimeError("boom")
+        j = jm.start("upgrade", "Upgrade → x", True, body)
+        await asyncio.sleep(0.05)
+        return jm, j
+    jm, j = asyncio.run(go())
+    assert j.status == "failed"
+    files = list((tmp_path / "jobs").glob("*-upgrade-*.txt"))
+    assert len(files) == 1
+    text = files[0].read_text(encoding="utf-8")
+    assert "Upgrade → x — failed" in text and "[info] hello" in text and "RuntimeError: boom" in text

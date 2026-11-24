@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ..topology import Topology
-from ..transport import NodeSession
+from ..transport import NodeSession, detached
 
 MESH_MODES = {"mesh", "meshap", "meshptp", "meshsta"}
 MANAGED_MODES = {"meshap", "meshptp", "meshsta"}   # the dialog applies managedOOB to these
@@ -678,7 +678,7 @@ async def run_radio_change(cluster: list[str],
                     f.write(script)
                 await s.upload(Path(f.name), REMOTE_SCRIPT)
                 Path(f.name).unlink(missing_ok=True)
-                await s.run(f"nohup sh {REMOTE_SCRIPT} >/dev/null 2>&1 </dev/null &", timeout=20)
+                await s.run(detached(f"sh {REMOTE_SCRIPT}"), timeout=20)
             finally:
                 await s.close()
             armed.append(n)

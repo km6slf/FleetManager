@@ -42,6 +42,17 @@ class Job:
     def log(self, msg: str, level: str = "info", **data: Any) -> None:
         self.events.append({"t": time.time(), "level": level, "msg": msg, **data})
 
+    def text(self) -> str:
+        """The job log as plain text, as shown in the Activity tab, plus error traces."""
+        lines = [f"{self.title} — {self.status}",
+                 f"started {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.started))}", ""]
+        for ev in self.events:
+            ts = time.strftime("%H:%M:%S", time.localtime(ev["t"]))
+            lines.append(f"{ts}  [{ev['level']}] {ev['msg']}")
+            if ev.get("trace"):
+                lines.append(ev["trace"].rstrip())
+        return "\n".join(lines) + "\n"
+
     def summary(self) -> dict[str, Any]:
         return {"id": self.id, "kind": self.kind, "title": self.title, "status": self.status,
                 "dry_run": self.dry_run,
@@ -54,9 +65,23 @@ class JobBusy(Exception):
 
 
 class JobManager:
-    def __init__(self) -> None:
+    def __init__(self, log_dir: Path | None = None) -> None:
         self.jobs: dict[str, Job] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self.log_dir = log_dir          # finished jobs' logs are saved here
+
+    def log_path(self, job: Job) -> Path | None:
+        if not self.log_dir:
+            return None
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(job.started))
+        return self.log_dir / f"{stamp}-{job.kind}-{job.id}.txt"
+
+    def save_log(self, job: Job) -> Path | None:
+        path = self.log_path(job)
+        if path:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(job.text(), encoding="utf-8")
+        return path
 
     def active_mutating(self) -> Job | None:
         return next((j for j in self.jobs.values() if j.mutating and j.status == "running"), None)
@@ -97,6 +122,10 @@ class JobManager:
                 job.log(f"{type(exc).__name__}: {exc}", "error", trace=traceback.format_exc())
             finally:
                 job.finished = time.time()
+                try:
+                    self.save_log(job)
+                except OSError:
+                    pass
 
         self._tasks[job.id] = asyncio.get_running_loop().create_task(runner())
         return job
@@ -117,7 +146,7 @@ class AppState:
         self.known_hosts = self.config_dir / "known_hosts"
         self.overrides_path = self.config_dir / "overrides.json"
         self.mirror = "https://downloads.arednmesh.org/"
-        self.jobs = JobManager()
+        self.jobs = JobManager(self.config_dir / "logs" / "jobs")
         self.topology = Topology()
         self.nodes: dict[str, dict[str, Any]] = {}
         self.root = ""

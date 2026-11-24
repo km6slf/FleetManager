@@ -210,7 +210,7 @@ class FakeCluster:
                     return CommandResult(0, "" if n in fc.no_rclocal else "ok\n", "")
                 if cmd.startswith("date"):
                     return CommandResult(0, str(int(fc.clock.now() + fc.skew)), "")
-                if cmd.startswith("nohup"):
+                if "trap '' HUP" in cmd and "sh /" in cmd:
                     s = fc.scripts[n]
                     fc.apply_at[n] = int(re.search(r"\[ (\d+) -gt", s).group(1))
                     fc.pending[n] = int(re.search(r'radio0_channel", "(-?\d+)"', s).group(1))

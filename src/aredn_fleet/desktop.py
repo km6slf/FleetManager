@@ -109,8 +109,10 @@ def _run_desktop() -> int:
 
     if webview is not None:
         try:
+            # text_select: pywebview disables selecting text by default, which made logs
+            # impossible to copy.
             webview.create_window("AREDN Fleet Manager", url, width=1320, height=860,
-                                  min_size=(1000, 640))
+                                  min_size=(1000, 640), text_select=True)
             webview.start()
             server.should_exit = True
             thread.join(timeout=5)

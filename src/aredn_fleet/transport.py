@@ -140,3 +140,12 @@ async def connect(node: str, store: CredentialStore, host_suffix: str = ".local.
         store.record_success(node, cred)
         return SSHSession(node, conn)
     raise AuthFailed(f"{node}: no credential worked ({'; '.join(errors) or 'none configured'})")
+
+
+def detached(cmd: str, log: str = "/dev/null") -> str:
+    """Shell line that starts ``cmd`` in the background so it survives the SSH session ending.
+
+    AREDN's BusyBox has no ``nohup``; ignoring SIGHUP in a subshell and exec'ing the command
+    does the same job (an ignored signal stays ignored across exec).
+    """
+    return f"( trap '' HUP; exec {cmd} ) >{log} 2>&1 </dev/null &"
