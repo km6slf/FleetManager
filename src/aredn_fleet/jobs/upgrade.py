@@ -387,7 +387,7 @@ class NodeUpgrade:
             raise ValueError("the node didn't produce a valid backup file")
         d = Path(self.cfg.backup_dir) / self.node
         d.mkdir(parents=True, exist_ok=True)
-        out = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{from_version or 'unknown'}.tgz"
+        out = d / f"{self.node}-{time.strftime('%Y%m%d-%H%M%S')}-{from_version or 'unknown'}.tgz"
         out.write_bytes(data)
         return str(out)
 
@@ -409,7 +409,7 @@ class NodeUpgrade:
             raise ValueError("the node's settings archive isn't a valid backup file")
         d = Path(self.cfg.backup_dir) / self.node
         d.mkdir(parents=True, exist_ok=True)
-        out = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{from_version or 'unknown'}.tgz"
+        out = d / f"{self.node}-{time.strftime('%Y%m%d-%H%M%S')}-{from_version or 'unknown'}.tgz"
         out.write_bytes(data)
         return str(out)
 

@@ -74,10 +74,13 @@ class SwitchDef:
     off_value: str = "0"
     other_writes: list[str] = field(default_factory=list)   # extra settings the handler changes
     disabled_if: Condition | None = None
+    legacy_index: int | None = None   # older firmware: row number on its Advanced Configuration page
+    needs_reboot: bool = False        # the node's page says a change needs a reboot
+    blocked_reason: str = ""          # Fleet Manager's own reason not to change it in bulk
 
     @property
     def bulk_ok(self) -> bool:
-        return self.write is not None and not self.other_writes
+        return self.write is not None and not self.other_writes and not self.blocked_reason
 
     @property
     def key(self) -> str:
@@ -86,6 +89,8 @@ class SwitchDef:
         return t.key if t else f"{self.dialog}:{self.name}"
 
     def why_not_bulk(self) -> str:
+        if self.blocked_reason:
+            return self.blocked_reason
         own = self.read.key if self.read else None
         others = list(dict.fromkeys(k for k in self.other_writes if k != own))
         if others:
@@ -118,6 +123,8 @@ class SwitchDef:
                    read=t(d.get("read")), read_rule=d.get("read_rule", "ne0"), write=t(d.get("write")),
                    on_value=d.get("on_value", "1"), off_value=d.get("off_value", "0"),
                    other_writes=list(d.get("other_writes") or []),
+                   legacy_index=d.get("legacy_index"), needs_reboot=bool(d.get("needs_reboot")),
+                   blocked_reason=d.get("blocked_reason", ""),
                    disabled_if=Condition(c["var"], Target(**c["target"]), c["equals"], c.get("negate", False))
                    if c else None)
 
@@ -222,6 +229,18 @@ def parse_dialog(src: str, dialog: str) -> list[SwitchDef]:
     return out
 
 
+# Settings that could cut this tool off from the node it's changing.
+LOCKOUT_RE = re.compile(r"ssh_access|dropbear", re.I)
+
+
+def _safety(sw: SwitchDef) -> SwitchDef:
+    t = sw.write or sw.read
+    if t and LOCKOUT_RE.search(t.option):
+        sw.blocked_reason = ("could stop Fleet Manager reaching the node over SSH; change it on "
+                             "the node itself")
+    return sw
+
+
 def parse_dialogs(dump: str) -> list[SwitchDef]:
     """Parse DIALOGS_CMD output (``@@FILE <path>`` markers)."""
     out: list[SwitchDef] = []
@@ -229,7 +248,79 @@ def parse_dialogs(dump: str) -> list[SwitchDef]:
     for i in range(1, len(parts) - 1, 2):
         dialog = parts[i].rsplit("/", 1)[-1].removesuffix(".ut")
         out += parse_dialog(parts[i + 1], dialog)
+    return [_safety(s) for s in out]
+
+
+# --------------------------------------------------------------------------- older firmware (Lua UI)
+#
+# Firmware before the ucode web UI (3.23 and earlier) has one Advanced Configuration page,
+# /www/cgi-bin/advancedconfig, built from a "settings" table: key (uci option), type, desc,
+# condition, callbacks, needreboot. Showing the page (a plain GET) lists only the settings
+# whose condition holds on that node, with their current values; saving is a POST of
+# button_save_<n> / newval_<n>, which runs the page's own callbacks. Fleet Manager reads and
+# saves through that page, so the node applies changes exactly as its own Save button would.
+
+LEGACY_PAGE = "/www/cgi-bin/advancedconfig"
+LEGACY_RENDER_CMD = (f"cd /www/cgi-bin && REQUEST_METHOD=GET QUERY_STRING= "
+                     f"SCRIPT_NAME=/cgi-bin/advancedconfig ./advancedconfig 2>/dev/null")
+LEGACY_SOURCE_CMD = f"sed -n '/^local settings = {{/,/^}}/p' {LEGACY_PAGE}"
+UI_KIND_CMD = (f"[ -d {DIALOG_DIR} ] && echo ucode; [ -x {LEGACY_PAGE} ] && echo lua; true")
+
+_ROW_RE = re.compile(r"<tr><td[^>]*>(?P<desc>.*?)<small>(?P<key>[^<]+)</small></td>\s*<td[^>]*>(?P<val>.*?)</td>", re.S)
+_BOX_RE = re.compile(r"<input type='checkbox' id='field_(\d+)' name='newval_\1' value='1'( checked)?")
+_CAT_RE = re.compile(r"<td colspan=3><b>(.*?)</b></td>")
+
+
+def parse_legacy_source(src: str) -> list[dict[str, Any]]:
+    """The page's settings table, in order (row n of the page is entry n, 1-based)."""
+    out = []
+    for block in re.findall(r"\{(.*?)\n\s*\}", src, re.S):
+        e: dict[str, Any] = {}
+        for k in ("key", "type", "category", "default"):
+            if m := re.search(rf'\b{k}\s*=\s*"([^"]*)"', block):
+                e[k] = m.group(1)
+        e["needreboot"] = bool(re.search(r"needreboot\s*=\s*true", block))
+        e["has_condition"] = "condition" in block
+        if "key" in e:
+            out.append(e)
     return out
+
+
+def parse_legacy_page(html_text: str, source: list[dict[str, Any]]) -> tuple[list[SwitchDef], dict[str, str | None]]:
+    """On/off settings the node's page shows, as SwitchDefs, plus their current values."""
+    switches: list[SwitchDef] = []
+    values: dict[str, str | None] = {}
+    for m in _ROW_RE.finditer(html_text):
+        box = _BOX_RE.search(m.group("val"))
+        if not box:
+            continue                      # text fields and actions aren't on/off settings
+        idx, key = int(box.group(1)), m.group("key").strip()
+        src = source[idx - 1] if 0 < idx <= len(source) else {}
+        if src.get("key") != key or src.get("type") != "boolean":
+            continue                      # page and table disagree: don't guess
+        parts = key.split(".", 2)
+        if len(parts) != 3 or not SECTION_RE.match(parts[1]) or not parts[1].startswith("@"):
+            continue                      # pseudo settings (actions such as "aredn.olsr.restart")
+        if SECRET_RE.search(parts[2]) or re.search(r"dangerous|force", key, re.I):
+            continue                      # never offered in bulk
+        desc_html = m.group("desc")
+        bold = re.search(r"<b>(.*?)</b>", desc_html, re.S)
+        label = _text(bold.group(1)) if bold else _text(desc_html)
+        tgt = Target(*parts)
+        sw = _safety(SwitchDef(name=f"newval_{idx}", dialog="advancedconfig", label=label,
+                               description=_text(desc_html), read=tgt, read_rule="eq1", write=tgt,
+                               legacy_index=idx, needs_reboot=bool(src.get("needreboot"))))
+        switches.append(sw)
+        values[tgt.key] = "1" if box.group(2) else "0"
+    return switches, values
+
+
+def legacy_save_command(index: int, on: bool) -> str:
+    """POST one setting to the node's own page, as its Save Setting button does."""
+    body = f"button_save_{int(index)}=Save+Setting" + (f"&newval_{int(index)}=1" if on else "")
+    return (f"cd /www/cgi-bin && printf '%s' '{body}' | REQUEST_METHOD=POST "
+            f"CONTENT_TYPE=application/x-www-form-urlencoded CONTENT_LENGTH={len(body)} "
+            f"SCRIPT_NAME=/cgi-bin/advancedconfig ./advancedconfig >/dev/null 2>&1; echo saved-$?")
 
 
 # --------------------------------------------------------------------------- reading a node
@@ -240,6 +331,7 @@ class NodeSettings:
     switches: list[SwitchDef]
     values: dict[str, str | None]          # target key -> raw value (None = unset)
     read_at: float = 0.0
+    legacy: bool = False                   # older firmware: read and saved through its Lua page
 
     def state(self, sw: SwitchDef) -> dict[str, Any]:
         raw = self.values.get(sw.read.key) if sw.read else None
@@ -253,12 +345,12 @@ class NodeSettings:
 
     def to_json(self) -> dict[str, Any]:
         return {"firmware": self.firmware, "read_at": self.read_at, "values": self.values,
-                "switches": [s.to_json() for s in self.switches]}
+                "legacy": self.legacy, "switches": [s.to_json() for s in self.switches]}
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "NodeSettings":
         return cls(d.get("firmware", ""), [SwitchDef.from_json(s) for s in d.get("switches", [])],
-                   dict(d.get("values") or {}), d.get("read_at", 0.0))
+                   dict(d.get("values") or {}), d.get("read_at", 0.0), bool(d.get("legacy")))
 
 
 def _targets(switches: list[SwitchDef]) -> list[Target]:
@@ -293,6 +385,12 @@ async def read_node_settings(session: NodeSession, cache: dict[str, list[SwitchD
     cache = _DEF_CACHE if cache is None else cache
     fw = (await session.run("cat /etc/mesh-release")).stdout.strip().splitlines()
     fw = fw[0] if fw else ""
+    kind = (await session.run(UI_KIND_CMD)).stdout
+    if "ucode" not in kind and "lua" in kind:
+        # Older firmware: the page decides what applies on this node, so read it every time.
+        src = parse_legacy_source((await session.run(LEGACY_SOURCE_CMD, timeout=30)).stdout)
+        sw, vals = parse_legacy_page((await session.run(LEGACY_RENDER_CMD, timeout=60)).stdout, src)
+        return NodeSettings(fw, sw, vals, (clock or time.time)(), legacy=True)
     switches = cache.get(fw) if fw else None
     if switches is None:
         switches = parse_dialogs((await session.run(DIALOGS_CMD, timeout=60)).stdout)
@@ -343,6 +441,7 @@ def plan_settings(ns: NodeSettings, changes: list[SettingChange]) -> list[Settin
             # Write the value the dialog writes for this state. For inverted reads (eq0) the
             # handler maps on/off itself, so "on" in the dialog is always the handler's on value.
             steps.append(SettingStep(c.key, sw.label, st["on"], c.on, "change",
+                                     "the node's page says this needs a reboot" if sw.needs_reboot else "",
                                      value=sw.on_value if c.on else sw.off_value))
     return steps
 
@@ -405,6 +504,8 @@ async def apply_node_settings(node: str, changes: list[SettingChange], connect, 
             res.status = "would-change"
             return res
         by_key = {sw.key: sw for sw in ns.switches}
+        if ns.legacy:
+            return await _apply_legacy(s, node, ns, todo, by_key, res, on_read, log)
         writes = [(by_key[x.key].write, x.value) for x in todo]
         log(node, "settings-apply", writes=[(t.key, v) for t, v in writes])
         await s.run(build_apply_command(writes), timeout=30)
@@ -453,6 +554,33 @@ async def apply_node_settings(node: str, changes: list[SettingChange], connect, 
     return res
 
 
+async def _apply_legacy(s, node, ns, todo, by_key, res, on_read, log) -> SettingsNodeResult:
+    """Save each setting through the node's own page (its callbacks run), then read the page
+    back. The page only flags a reboot when one is needed; that's reported, not done."""
+    for x in todo:
+        sw = by_key[x.key]
+        log(node, "settings-apply-legacy", key=x.key, on=x.after, row=sw.legacy_index)
+        out = (await s.run(legacy_save_command(sw.legacy_index, bool(x.after)), timeout=120)).stdout
+        if "saved-0" not in out:
+            res.status, res.detail = "failed", f"the node's page didn't save {sw.label}: {out.strip()[:200]}"
+            return res
+    src = parse_legacy_source((await s.run(LEGACY_SOURCE_CMD, timeout=30)).stdout)
+    sw2, vals = parse_legacy_page((await s.run(LEGACY_RENDER_CMD, timeout=60)).stdout, src)
+    ns2 = NodeSettings(ns.firmware, sw2, vals, legacy=True)
+    if on_read:
+        on_read(node, ns2)
+    by2 = {w.key: w for w in sw2}
+    wrong = [by_key[x.key].label for x in todo
+             if x.key not in by2 or ns2.state(by2[x.key])["on"] != x.after]
+    if wrong:
+        res.status, res.detail = "failed", f"the node's page doesn't show the change for: {', '.join(wrong)}"
+        return res
+    reboot = (await s.run("[ -e /tmp/reboot-required ] && echo yes; true")).stdout.strip() == "yes"
+    res.status, res.reboot_required = "changed", reboot
+    res.detail = "reboot needed to finish (the node's page says so)" if reboot else ""
+    return res
+
+
 def summarize(nodes: dict[str, NodeSettings]) -> list[dict[str, Any]]:
     """One row per setting across nodes: labels as the nodes show them, and who has what."""
     rows: dict[str, dict[str, Any]] = {}
@@ -460,7 +588,7 @@ def summarize(nodes: dict[str, NodeSettings]) -> list[dict[str, Any]]:
         for pos, sw in enumerate(ns.switches):
             r = rows.setdefault(sw.key, {"key": sw.key, "pos": pos, "labels": [], "descriptions": [], "help": "",
                                          "dialogs": [], "on": [], "off": [], "disabled": [],
-                                         "not_bulk": {}, "nodes": []})
+                                         "not_bulk": {}, "nodes": [], "reboot": []})
             if sw.label not in r["labels"]:
                 r["labels"].append(sw.label)
             if sw.description and sw.description not in r["descriptions"]:
@@ -475,6 +603,8 @@ def summarize(nodes: dict[str, NodeSettings]) -> list[dict[str, Any]]:
                 r["disabled"].append(n)
             if not sw.bulk_ok:
                 r["not_bulk"][n] = sw.why_not_bulk()
+            if sw.needs_reboot:
+                r["reboot"].append(n)
     for r in rows.values():
         r["missing"] = sorted(set(nodes) - set(r["nodes"]))
     # The order the nodes' own screens show them in.

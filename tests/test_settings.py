@@ -154,3 +154,108 @@ def test_definitions_cached_per_firmware():
     asyncio.run(go())
     assert sum(c.startswith("for f in") for c in node.commands) == 1
     assert json.dumps(ns({}).to_json())
+
+
+# ---------------------------------------------------------------- older firmware (Lua page)
+from aredn_fleet.jobs.settings import legacy_save_command, parse_legacy_page, parse_legacy_source  # noqa: E402
+
+FIX = Path(__file__).parent / "fixtures"
+OLD_SRC = (FIX / "advancedconfig-3.23.8.0-settings.lua").read_text()
+OLD_PAGE = (FIX / "advancedconfig-3.23.8.0.html").read_text()
+
+
+def legacy():
+    return parse_legacy_page(OLD_PAGE, parse_legacy_source(OLD_SRC))
+
+
+def test_old_page_settings_and_values_come_from_the_node():
+    sw, vals = legacy()
+    by = {s.key: s for s in sw}
+    lan = by["aredn.@wan[0].lan_dhcp_route"]
+    assert lan.label == "Allow my LAN devices to access my WAN" and lan.needs_reboot and lan.bulk_ok
+    assert vals["aredn.@wan[0].lan_dhcp_route"] == "1" and vals["aredn.@wan[0].olsrd_gw"] == "0"
+    assert lan.legacy_index == 12 and by["aredn.@lqm[0].enable"].legacy_index == 1
+    # text fields, actions and the dangerous-upgrade switch are never offered
+    assert "aredn.@lqm[0].mtu" not in by and "aredn.olsr.restart" not in by
+    assert not any("dangerous" in k for k in by)
+    # rows the page hides on this node (LQM is off, so its tuning rows) aren't there either
+    assert "aredn.@lqm[0].margin_snr" not in by
+    # turning off SSH from the WAN could lock this tool out
+    assert not by["aredn.@wan[0].ssh_access"].bulk_ok
+
+
+def test_old_and_new_firmware_share_rows_by_setting_name():
+    sw, vals = legacy()
+    old = NodeSettings("3.23.8.0", sw, vals, legacy=True)
+    rows = {r["key"]: r for r in summarize({"new": ns({"aredn.@wan[0].lan_dhcp_route": "1"}), "old": old})}
+    r = rows["aredn.@wan[0].lan_dhcp_route"]
+    assert set(r["nodes"]) == {"new", "old"} and r["reboot"] == ["old"]
+    assert set(r["labels"]) == {"LAN to WAN", "Allow my LAN devices to access my WAN"}
+    assert rows["aredn.@wan[0].mesh_internet"]["missing"] == ["old"]
+
+
+def test_old_page_save_command():
+    on = legacy_save_command(12, True)
+    assert "button_save_12=Save+Setting&newval_12=1" in on and "REQUEST_METHOD=POST" in on
+    off = legacy_save_command(12, False)
+    assert "button_save_12=Save+Setting'" in off and "newval_12" not in off   # unchecked box sends nothing
+
+
+class FakeOldNode:
+    """An older node: settings live behind its Lua page; POSTs flip the checkbox."""
+
+    def __init__(self):
+        self.page = OLD_PAGE
+        self.reboot = False
+        self.commands = []
+
+    async def connect(self, n):
+        node = self
+
+        class S:
+            async def run(self, cmd, timeout=60):
+                node.commands.append(cmd)
+                if cmd.startswith("cat /etc/mesh-release"):
+                    return CommandResult(0, "3.23.8.0\n", "")
+                if "echo ucode" in cmd:
+                    return CommandResult(0, "lua\n", "")
+                if cmd.startswith("sed -n '/^local settings"):
+                    return CommandResult(0, OLD_SRC, "")
+                if "REQUEST_METHOD=GET" in cmd:
+                    return CommandResult(0, node.page, "")
+                if "REQUEST_METHOD=POST" in cmd:
+                    import re
+                    i = re.search(r"button_save_(\d+)", cmd).group(1)
+                    on = f"newval_{i}=1" in cmd
+                    node.page = re.sub(rf"(name='newval_{i}' value='1')( checked)?",
+                                       r"\1 checked" if on else r"\1", node.page)
+                    node.reboot = True
+                    return CommandResult(0, "saved-0\n", "")
+                if "reboot-required" in cmd:
+                    return CommandResult(0, "yes\n" if node.reboot else "", "")
+                return CommandResult(0, "", "")
+
+            async def close(self):
+                pass
+        return S()
+
+
+def test_old_node_change_goes_through_its_page():
+    node = FakeOldNode()
+    ch = [SettingChange("aredn.@wan[0].lan_dhcp_route", False)]
+    dry = asyncio.run(apply_node_settings("ns", ch, node.connect, execute=False, sleep=no_sleep))
+    assert dry.status == "would-change" and "reboot" in dry.steps[0]["detail"]
+    assert not any("POST" in c for c in node.commands)
+    res = asyncio.run(apply_node_settings("ns", ch, node.connect, execute=True, sleep=no_sleep))
+    assert res.status == "changed" and res.reboot_required, res.detail
+    assert sum("REQUEST_METHOD=POST" in c for c in node.commands) == 1
+    assert not any("uci" in c and "set" in c for c in node.commands)     # never behind its back
+    again = asyncio.run(apply_node_settings("ns", ch, node.connect, execute=True, sleep=no_sleep))
+    assert again.status == "unchanged"
+
+
+def test_new_settings_missing_on_old_node_are_reported():
+    node = FakeOldNode()
+    res = asyncio.run(apply_node_settings("ns", [SettingChange("aredn.@wan[0].mesh_internet", False)],
+                                          node.connect, execute=False, sleep=no_sleep))
+    assert res.status == "unchanged" and "no such switch" in res.detail

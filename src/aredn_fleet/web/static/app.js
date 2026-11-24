@@ -436,8 +436,9 @@ $("#btn-ra-go").addEventListener("click", (e) => guarded(async () => {
 }));
 
 // Routing protocol from the node's firmware version (OLSR-only nodes need a dual-protocol
-// release before Babel-only firmware; Babel nodes are the norm, so they get no badge).
+// release before Babel-only firmware).
 const ROUTING_BADGE = {
+  babel: '<span class="badge babel" title="Speaks only Babel (4.26 and later). It can\'t see OLSR-only nodes.">Babel</span>',
   olsr: '<span class="badge olsr" title="Speaks only OLSR (firmware before 3.25.5). Babel-only nodes can\'t see it. Upgrade it to an OLSR + Babel release (3.25.5.0 or later 3.25.x) before any Babel-only firmware.">OLSR</span>',
   dual: '<span class="badge dual" title="Speaks OLSR and Babel (3.25.5 to 3.25.10): the bridge between old and new nodes">OLSR+Babel</span>',
   unknown: '<span class="badge unknown" title="Nightly firmware: routing protocol can\'t be told from the version">routing?</span>',
@@ -471,10 +472,12 @@ async function loadSettingsPanel() {
     const notBulk = Object.keys(r.not_bulk).length === r.nodes.length;
     const why = Object.values(r.not_bulk)[0] || "";
     const counts = [`on ${r.on.length}`, `off ${r.off.length}`].concat(r.missing.length ? [`not on ${r.missing.length}`] : [])
-      .concat(r.disabled.length ? [`disabled on ${r.disabled.length}`] : []).join(" · ");
+      .concat(r.disabled.length ? [`disabled on ${r.disabled.length}`] : [])
+      .concat(r.reboot?.length ? [`reboot needed on ${r.reboot.length}`] : []).join(" · ");
     const tip = [r.descriptions.join(" / "), r.help, `Setting: ${r.key}`, `Dialog: ${r.dialogs.join(", ")}`,
       r.on.length ? `On: ${r.on.join(", ")}` : "", r.off.length ? `Off: ${r.off.join(", ")}` : "",
-      r.missing.length ? `Not in the firmware of: ${r.missing.join(", ")}` : ""].filter(Boolean).join("\n");
+      r.missing.length ? `Not in the firmware of: ${r.missing.join(", ")}` : "",
+      r.reboot?.length ? `Changing it needs a reboot on (their own page says so): ${r.reboot.join(", ")}` : ""].filter(Boolean).join("\n");
     const v = prev[r.key] ?? "";
     return `<tr title="${esc(tip)}"><td><b>${esc(r.labels.join(" / "))}</b><div class="muted small">${esc(counts)} of ${n}</div>
       ${notBulk ? `<div class="muted small">Set on the node: ${esc(why)}</div>` : ""}</td>

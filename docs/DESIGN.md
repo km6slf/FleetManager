@@ -61,7 +61,7 @@ Safe, bulk updating of AREDN nodes. Inspired by the "Fleet Manager … doesn't e
 
 ### Release-candidate safeguards (from AREDN's RC notes)
 These come from `aredn_fleet/rc.py`. They apply when the target is an RC nightly (20261012 or later) or a stable release after 4.26.10.0.
-* **Config backup before every flash** (all upgrades, not just RC). The node writes `aredn.configuration.backup()` to `/tmp`, the manager downloads it over SSH, and saves it to `config/backups/<node>/<time>-<from-version>.tgz`. If the backup fails, that node isn't upgraded. The backup can include the password hash and Wi-Fi keys, so it stays on this computer.
+* **Config backup before every flash** (all upgrades, not just RC). The node writes `aredn.configuration.backup()` to `/tmp`, the manager downloads it over SSH, and saves it to `config/backups/<node>/<node>-<time>-<from-version>.tgz` (named for the node, so a copied file still says where it came from). If the backup fails, that node isn't upgraded. The backup can include the password hash and Wi-Fi keys, so it stays on this computer.
 * **PtMP access point before its Mesh Stations.** Access point / station pairs come from the radio details (RF neighbours with Mesh PtMP and Mesh Station radios on the same band). The planner uses `must_precede` constraints so an access point is ordered ahead of its stations when both are selected; nodes behind them still go outermost first. This applies to every upgrade, since it's harmless.
   * For RC targets, a live check before each station: each access point must already run 4.26.7.0 or the RC, or be earlier in the same run. Otherwise the station is BLOCKED and the reason says what to upgrade first.
   * If a neighbour's radio details are missing, every RF neighbour is treated as a possible access point, and the message says so.
@@ -71,7 +71,7 @@ These come from `aredn_fleet/rc.py`. They apply when the target is an RC nightly
 
 ### Older firmware and the OLSR → Babel move
 From AREDN's release notes: up to 3.25.4 nodes speak only OLSR; 3.25.5.0–3.25.10.0 speak OLSR and Babel side by side; 4.26.1.0 and later speak only Babel. Babel-only nodes don't know OLSR-only nodes exist. (`aredn_fleet/routing.py`)
-* **Routing per node** comes from its firmware version, shown as an **OLSR** / **OLSR+Babel** badge in the Nodes table (Babel is the norm and gets none; date-named nightlies before 2026-01-14 show "routing?"). During an upgrade the running daemons (`pidof olsrd`, `pidof babeld`) are checked too.
+* **Routing per node** comes from its firmware version, shown as an **OLSR** / **OLSR+Babel** badge in the Nodes table plus **Babel** (date-named nightlies before 2026-01-14 show "routing?"). During an upgrade the running daemons (`pidof olsrd`, `pidof babeld`) are checked too.
 * **Migration rule** for a Babel-only target, judged on the mesh as it will be after the run, repeated until stable because a blocked node stays where it is:
   * an OLSR-only node is blocked: it must go to an OLSR + Babel release first;
   * a node is blocked if, afterwards, nothing on its path back to this computer speaks Babel;
@@ -84,7 +84,9 @@ From AREDN's release notes: up to 3.25.4 nodes speak only OLSR; 3.25.5.0–3.25.
   2. check the image with `validate_firmware_image` and the node's `firmwarecheck.sh` after dropping caches;
   3. detached: set `nodeupgraded` with the node's own Lua (`aredn.info.set_nvram`), stop the services listed in the node's `upgrade_prepare.sh` except dropbear (so a failure can still be read), then `aredn_sysupgrade -f <archive> -q <image>`. If sysupgrade returns, nothing was flashed: the flag and services are restored;
   4. wait through the second reboot older firmware does to apply the kept settings, then verify as usual.
-* Radio and settings jobs need the ucode web UI (3.25.5+); for older nodes they say so and skip them.
+* **Settings on older nodes** go through the node's own **Advanced Configuration** page (`/www/cgi-bin/advancedconfig`, Lua). Its `settings` table gives each entry's key (uci option), type, condition, callbacks and `needreboot`. Showing the page (a plain GET over SSH) lists only the settings whose condition holds on that node, with current values. Saving POSTs `button_save_<n>` / `newval_<n>` to the same page, so the node runs its own callbacks (e.g. `node-setup -a mesh`) exactly as its Save button would; the page is read back to confirm. Only real on/off uci settings are offered: text fields, actions (`aredn.olsr.restart`) and the dangerous-upgrade switch never are. Rows merge with newer firmware by setting name (e.g. `lan_dhcp_route`). When the page flags a reboot, the review says so and the result lists the nodes to reboot (Fleet Manager doesn't reboot them).
+* On every firmware, switches that could cut Fleet Manager off (`ssh_access`) are shown but not changed in bulk.
+* Radio changes need the ucode web UI (3.25.5+); for older nodes Read radios says so and skips them.
 * **Field check (2026-11-24):** NanoStation M2 XM on 3.23.8.0 (Lua UI, `olsrd` with jsoninfo on 9090, DtD on IPv4 `/8`, IPv6 off, 28 MB RAM / 13.8 MB `/tmp`). Cabled to the Babel-only hAP's DtD port, neither saw the other: the hAP's DtD bridge has no IPv4 address.
 
 ## Radio settings (channel / width / mode)
@@ -257,6 +259,8 @@ Fleet Manager doesn't carry a list of AREDN settings: they change between releas
 * [x] RC safeguards: pre-flash config backups, PtMP AP before stations, removed AC channels blocked, IPQ40xx freeze warning, radio re-read/out-of-date marking
 * [x] Node settings learned from each node's own dialogs (labels, rules, save handler), bulk on/off job with review; radio purposes from the node's hardware module
 * [x] OLSR-era nodes: old status page, routing badge, migration rule, last release per hardware, older upgrade procedure (tested against a simulated node; recon from a real 3.23.8.0 NanoStation)
+* [x] Settings on older nodes through their own Advanced Configuration page (tested with the real 3.23.8.0 page)
+* [x] Babel badge; backup files named for the node
 * [ ] First real upgrade of an older node (NanoStation M2 XM 3.23.8.0 → 3.25.5.1)
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)
 * [x] Nightly recon (3 passes): new channel-list format and setter names supported

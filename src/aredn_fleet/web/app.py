@@ -522,7 +522,7 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
         from ..routing import OLSR, routing_of
         fw = (state.nodes.get(n) or {}).get("firmware", "")
         if routing_of(fw) == OLSR:
-            return (f"{n}: firmware {fw} is older than these jobs support (its web UI is Lua, "
+            return (f"{n}: firmware {fw} is older than radio changes support (its web UI is Lua, "
                     "not ucode). Upgrade it to an OLSR + Babel release first.")
         return None
 
@@ -542,9 +542,6 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
             async def one(n):
                 nonlocal ok
-                if why := old_firmware_reason(n):
-                    job.log(why, "warn")
-                    return
                 async with sem:
                     try:
                         s = await connect(n)
@@ -557,7 +554,8 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                         return
                     state.set_settings(n, ns)
                     ok += 1
-                    job.log(f"{n}: {len(ns.switches)} switches in its dialogs ({ns.firmware})", "ok")
+                    where = "its Advanced Configuration page" if ns.legacy else "its dialogs"
+                    job.log(f"{n}: {len(ns.switches)} on/off settings in {where} ({ns.firmware})", "ok")
 
             job.log(f"Reading settings from {len(req.nodes)} node(s)' own dialogs over SSH…")
             await asyncio.gather(*(one(n) for n in req.nodes))
@@ -612,6 +610,11 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                         job.log("stopped at the first failure", "error")
                         break
             state.save_creds(creds)
+            need = [r["node"] for r in out["results"] if r.get("reboot_required")]
+            if need:
+                job.log("Reboot needed to finish (each node's page says so): " + ", ".join(need)
+                        + ". Reboot them when convenient.", "warn")
+            out["reboot_needed"] = need
             return out
 
         title = f"{'Settings change' if req.execute else 'Settings dry run'} ({len(req.nodes)} nodes)"

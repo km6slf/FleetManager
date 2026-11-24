@@ -1,0 +1,254 @@
+<!-- Rendered /cgi-bin/advancedconfig (GET) from AREDN 3.23.8.0 (GPL-3.0, AREDN contributors), trimmed for tests -->
+<tbody>
+<tr align=center style=background-color:lightseagreen><td colspan=3><b>Link Quality Settings</b></td></tr>
+<tr><td width=40%>Enable <b>Link Quality Management</b><br><br><small>aredn.@lqm[0].enable</small></td>
+<td width=45%>
+OFF<label class='switch'><input type='checkbox' id='field_1' name='newval_1' value='1'><span class='slider round'></span></label>ON
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_1' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="return toggleDefault('field_1', '1' );">
+</td></tr>
+<tr><td width=40%><b>Maximum packet size</b> in bytes sent over WiFi (256 to 1500)<br><br><small>aredn.@lqm[0].mtu</small></td>
+<td width=45%>
+<input type='text' id='field_8' name='newval_8' style='width:100%' value=''>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_8' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_8').value='1500';">
+</td></tr>
+<tr align=center style=background-color:lightseagreen><td colspan=3><b>WAN Settings</b></td></tr>
+<tr><td width=40%><b>Allow other MESH nodes to use my WAN</b> - not recommended and OFF by default<br><br><small>aredn.@wan[0].olsrd_gw</small></td>
+<td width=45%>
+OFF<label class='switch'><input type='checkbox' id='field_11' name='newval_11' value='1'><span class='slider round'></span></label>ON
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_11' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="return toggleDefault('field_11', '0' );">
+</td></tr>
+<tr><td width=40%><b>Allow my LAN devices to access my WAN</b> - ON by default<br><br><small>aredn.@wan[0].lan_dhcp_route</small></td>
+<td width=45%>
+OFF<label class='switch'><input type='checkbox' id='field_12' name='newval_12' value='1' checked><span class='slider round'></span></label>ON
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_12' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="return toggleDefault('field_12', '1' );">
+</td></tr>
+<tr><td width=40%><b>Provide default route to LAN devices</b> even when WAN access is disabled<br><br><small>aredn.@wan[0].lan_dhcp_defaultroute</small></td>
+<td width=45%>
+OFF<label class='switch'><input type='checkbox' id='field_13' name='newval_13' value='1'><span class='slider round'></span></label>ON
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_13' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="return toggleDefault('field_13', '0' );">
+</td></tr>
+<tr><td width=40%><b>WAN VLAN Number</b> - must be an integer in the range [1,4094]<br><br><small>aredn.wan.vlanid</small></td>
+<td width=45%>
+<input type='text' id='field_14' name='newval_14' style='width:100%' value='1'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_14' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_14').value='';">
+</td></tr>
+<tr><td width=40%><b>Enable web access</b> to the node from the WAN interface<br><br><small>aredn.@wan[0].web_access</small></td>
+<td width=45%>
+OFF<label class='switch'><input type='checkbox' id='field_15' name='newval_15' value='1' checked><span class='slider round'></span></label>ON
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_15' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="return toggleDefault('field_15', '1' );">
+</td></tr>
+<tr><td width=40%><b>Enable SSH access</b> to the node from the WAN interface<br><br><small>aredn.@wan[0].ssh_access</small></td>
+<td width=45%>
+OFF<label class='switch'><input type='checkbox' id='field_16' name='newval_16' value='1' checked><span class='slider round'></span></label>ON
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_16' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="return toggleDefault('field_16', '1' );">
+</td></tr>
+<tr><td width=40%><b>Enable TELNET access</b> to the node from the WAN interface<br><br><small>aredn.@wan[0].telnet_access</small></td>
+<td width=45%>
+OFF<label class='switch'><input type='checkbox' id='field_17' name='newval_17' value='1' checked><span class='slider round'></span></label>ON
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_17' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="return toggleDefault('field_17', '1' );">
+</td></tr>
+<tr align=center style=background-color:lightseagreen><td colspan=3><b>Power Options</b></td></tr>
+<tr><td width=40%><b>PoE Passthrough</b> specifies whether PoE power should be enabled (Not all devices have PoE passthrough ports)<br><br><small>aredn.@poe[0].passthrough</small></td>
+<td width=45%>
+OFF<label class='switch'><input type='checkbox' id='field_18' name='newval_18' value='1'><span class='slider round'></span></label>ON
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_18' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="return toggleDefault('field_18', '0' );">
+</td></tr>
+<tr align=center style=background-color:lightseagreen><td colspan=3><b>Tunnel Options</b></td></tr>
+<tr><td width=40%><b>Tunnel Maxclients</b> specifies the maximum number of tunnel clients this node can serve; must be an integer in the range [0,100].<br><br><small>aredn.@tunnel[0].maxclients</small></td>
+<td width=45%>
+<input type='text' id='field_20' name='newval_20' style='width:100%' value='10'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_20' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_20').value='10';">
+</td></tr>
+<tr><td width=40%><b>Tunnel Maxservers</b> specifies the maximum number of tunnel servers to which this node can connect; must be an integer in the range [0,100].<br><br><small>aredn.@tunnel[0].maxservers</small></td>
+<td width=45%>
+<input type='text' id='field_21' name='newval_21' style='width:100%' value='10'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_21' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_21').value='10';">
+</td></tr>
+<tr><td width=40%><b>WAN-Only Tunnel</b> prevents tunnel traffic from being routed over the Mesh network itself<br><br><small>aredn.@tunnel[0].wanonly</small></td>
+<td width=45%>
+OFF<label class='switch'><input type='checkbox' id='field_22' name='newval_22' value='1' checked><span class='slider round'></span></label>ON
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_22' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="return toggleDefault('field_22', '1' );">
+</td></tr>
+<tr align=center style=background-color:lightseagreen><td colspan=3><b>Memory Settings</b></td></tr>
+<tr><td width=40%><b>Low Memory Threshold</b> in KB when the Mesh Status page will be truncated<br><br><small>aredn.@meshstatus[0].lowmem</small></td>
+<td width=45%>
+<input type='text' id='field_23' name='newval_23' style='width:100%' value=''>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_23' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_23').value='10000';">
+</td></tr>
+<tr><td width=40%><b>Low Memory Max Routes</b> is the maximum number of routes shown on the Mesh Status page when low memory is detected<br><br><small>aredn.@meshstatus[0].lowroutes</small></td>
+<td width=45%>
+<input type='text' id='field_24' name='newval_24' style='width:100%' value=''>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_24' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_24').value='1000';">
+</td></tr>
+<tr align=center style=background-color:lightseagreen><td colspan=3><b>Network Tools</b></td></tr>
+<tr><td width=40%><b>OLSR Restart</b> will restart OLSR when executed; wait up to 2 or 3 minutes to receive response<br><br><small>aredn.olsr.restart</small></td>
+<td width=45%>
+Click EXECUTE button to trigger this action<input type='hidden' id='field_25' name='newval_25' value=''>
+</td>
+<td align='center' width=15%><span style='vertical-align:middle;'><input type='submit' name='button_save_25' value='Execute' /><span>
+</td></tr>
+<tr><td width=40%><b>IPERF Enable</b> allows the included iperf3 client/server<br><br><small>aredn.@iperf[0].enable</small></td>
+<td width=45%>
+OFF<label class='switch'><input type='checkbox' id='field_26' name='newval_26' value='1' checked><span class='slider round'></span></label>ON
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_26' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="return toggleDefault('field_26', '1' );">
+</td></tr>
+<tr align=center style=background-color:lightseagreen><td colspan=3><b>Map Paths</b></td></tr>
+<tr><td width=40%><b>Map Tiles URL</b><br><br><small>aredn.@map[0].maptiles</small></td>
+<td width=45%>
+<input type='text' id='field_27' name='newval_27' style='width:100%' value='http://stamen-tiles-{s}.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_27' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_27').value='http://stamen-tiles-{s}.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg';">
+</td></tr>
+<tr><td width=40%><b>Leaflet.css URL</b><br><br><small>aredn.@map[0].leafletcss</small></td>
+<td width=45%>
+<input type='text' id='field_28' name='newval_28' style='width:100%' value='http://unpkg.com/leaflet@0.7.7/dist/leaflet.css'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_28' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_28').value='http://unpkg.com/leaflet@0.7.7/dist/leaflet.css';">
+</td></tr>
+<tr><td width=40%><b>Leaflet.js URL</b><br><br><small>aredn.@map[0].leafletjs</small></td>
+<td width=45%>
+<input type='text' id='field_29' name='newval_29' style='width:100%' value='http://unpkg.com/leaflet@0.7.7/dist/leaflet.js'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_29' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_29').value='http://unpkg.com/leaflet@0.7.7/dist/leaflet.js';">
+</td></tr>
+<tr align=center style=background-color:lightseagreen><td colspan=3><b>Firmware</b></td></tr>
+<tr><td width=40%><b>Firmware Download URL</b><br><br><small>aredn.@downloads[0].firmwarepath</small></td>
+<td width=45%>
+<input type='text' id='field_30' name='newval_30' style='width:100%' value='http://downloads.arednmesh.org/firmware'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_30' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_30').value='http://downloads.arednmesh.org/firmware';">
+</td></tr>
+<tr><td width=40%><b>Core Packages Download URL</b><br><br><small>aredn.@downloads[0].pkgs_core</small></td>
+<td width=45%>
+<input type='text' id='field_31' name='newval_31' style='width:100%' value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/targets/ath79/tiny/packages'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_31' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_31').value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/targets/ath79/tiny/packages';">
+</td></tr>
+<tr><td width=40%><b>Base Packages URL</b><br><br><small>aredn.@downloads[0].pkgs_base</small></td>
+<td width=45%>
+<input type='text' id='field_32' name='newval_32' style='width:100%' value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/base'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_32' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_32').value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/base';">
+</td></tr>
+<tr><td width=40%><b>AREDN Packages URL</b><br><br><small>aredn.@downloads[0].pkgs_arednpackages</small></td>
+<td width=45%>
+<input type='text' id='field_33' name='newval_33' style='width:100%' value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/arednpackages'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_33' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_33').value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/arednpackages';">
+</td></tr>
+<tr><td width=40%><b>Luci Packages URL</b><br><br><small>aredn.@downloads[0].pkgs_luci</small></td>
+<td width=45%>
+<input type='text' id='field_34' name='newval_34' style='width:100%' value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/luci'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_34' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_34').value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/luci';">
+</td></tr>
+<tr><td width=40%><b>Package Download URL</b> for packages not included in the other sections<br><br><small>aredn.@downloads[0].pkgs_packages</small></td>
+<td width=45%>
+<input type='text' id='field_35' name='newval_35' style='width:100%' value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/packages'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_35' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_35').value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/packages';">
+</td></tr>
+<tr><td width=40%><b>Routing Packages URL</b><br><br><small>aredn.@downloads[0].pkgs_routing</small></td>
+<td width=45%>
+<input type='text' id='field_36' name='newval_36' style='width:100%' value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/routing'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_36' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_36').value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/routing';">
+</td></tr>
+<tr><td width=40%><b>Telephony Packages URL</b><br><br><small>aredn.@downloads[0].pkgs_telephony</small></td>
+<td width=45%>
+<input type='text' id='field_37' name='newval_37' style='width:100%' value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/telephony'>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_37' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_37').value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/telephony';">
+</td></tr>
+<tr><td width=40%><b>Freifunk Packages URL</b><br><br><small>aredn.@downloads[0].pkgs_freifunk</small></td>
+<td width=45%>
+<input type='text' id='field_38' name='newval_38' style='width:100%' value=''>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_38' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_38').value='http://downloads.arednmesh.org/releases/3/23/3.23.8.0/packages/mips_24kc/freifunk';">
+</td></tr>
+<tr><td width=40%><b>Dangerous Upgrade Disables</b> all safety checks usually applied when upgrading firmware<br><br><small>aredn.firmware.dangerous_upgrade</small></td>
+<td width=45%>
+OFF<label class='switch'><input type='checkbox' id='field_39' name='newval_39' value='1'><span class='slider round'></span></label>ON
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_39' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="return toggleDefault('field_39', '0' );">
+</td></tr>
+<tr align=center style=background-color:lightseagreen><td colspan=3><b>AREDN Alert Settings</b></td></tr>
+<tr><td width=40%><b>Alert Message Refresh</b> - Execute to pull any AREDN Alert messages<br><br><small>aredn.aam.refresh</small></td>
+<td width=45%>
+Click EXECUTE button to trigger this action<input type='hidden' id='field_40' name='newval_40' value=''>
+</td>
+<td align='center' width=15%><span style='vertical-align:middle;'><input type='submit' name='button_save_40' value='Execute' /><span>
+</td></tr>
+<tr><td width=40%><b>Alert Message Local URL</b> - location from which local AREDN Alerts can be downloaded<br><br><small>aredn.@alerts[0].localpath</small></td>
+<td width=45%>
+<input type='text' id='field_41' name='newval_41' style='width:100%' value=''>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_41' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_41').value='';">
+</td></tr>
+<tr><td width=40%><b>Alert Message Groups</b> - comma seperated list of group names to check for alert messages<br><br><small>aredn.@alerts[0].groups</small></td>
+<td width=45%>
+<input type='text' id='field_42' name='newval_42' style='width:100%' value=''>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_42' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_42').value='';">
+</td></tr>
+<tr><td width=40%><b>Alert Message Pollrate</b> - how many hours to wait between polling for new AREDN Alerts<br><br><small>aredn.@alerts[0].pollrate</small></td>
+<td width=45%>
+<input type='text' id='field_43' name='newval_43' style='width:100%' value=''>
+</td>
+<td align='center' width=15%><span class=brsm /><input type='submit' name='button_save_43' value='Save Setting' /><br><span class=brsm />
+<input value='Set to Default' type='button' onclick="document.getElementById('field_43').value='12';">
+</td></tr>
+<tr><td width=40%><b>Alert Message Purge</b> - execute to immediately delete all alerts from this node<br><br><small>aredn.aam.purge</small></td>
+<td width=45%>
+Click EXECUTE button to trigger this action<input type='hidden' id='field_44' name='newval_44' value=''>
+</td>
+<td align='center' width=15%><span style='vertical-align:middle;'><input type='submit' name='button_save_44' value='Execute' /><span>
+</td></tr>
+</tbody></table></form></center>
