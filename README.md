@@ -16,7 +16,8 @@ Both need the Microsoft Edge WebView2 runtime, which is built into Windows 10 an
 What's in it:
 - **Nodes:** discover the mesh, filter it, and tick the nodes to work on. A column shows each node that is the *only path* to others.
 - **Firmware upgrade:** preview the order (outermost first, your own node last), do a dry run, then **Upgrade…** with a typed confirmation. A run stops at the first failure.
-- **Radio settings, per radio:** each band the selected nodes have (900 MHz, 2.4, 3.4, 5 or 6 GHz) gets its own section, with every node's current settings. Purpose, width and channel are chosen from lists that match the node's own Radios & Antennas screen, narrowed to what every selected node supports. Each RF cluster switches together and reverts on its own unless every node confirms.
+- **Radio settings, per radio:** each band the selected nodes have (900 MHz, 2.4, 3.4, 5 or 6 GHz) gets its own section, with every node's current settings. Purpose, width and channel are chosen from lists that match the node's own Radios & Antennas screen, narrowed to what every selected node supports. Each RF cluster switches together and reverts on its own unless every node confirms. The **mesh SSID** defaults to `AREDN` (shown as e.g. `AREDN-10-v3`) and can be changed, for groups such as IDEC that use their own.
+- **Node-specific settings:** give any node its own channel, width, purpose or SSID (with a note) while it stays in the group. Its values replace the group's when it's included in a change. These nodes carry a purple **custom** marker in the list.
 - **Map:** nodes arranged by hops from you, with RF, DTD and tunnel links. Click to select.
 - **Firmware:** download the 2 newest stable releases plus the nightly, for the hardware in your mesh, all hardware, or named boards. Every image is SHA-256 checked.
 - **Credentials:** add SSH keys (by file path) and node passwords. Passwords go to Windows Credential Manager.

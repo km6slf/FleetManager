@@ -91,12 +91,14 @@ function renderNodes() {
     return `<tr data-node="${esc(n.name)}" class="${sel ? "sel" : ""}">
       <td class="chk"><input type="checkbox" ${sel ? "checked" : ""} tabindex="-1"></td>
       <td><b>${esc(n.name)}</b> ${n.name === state.topo.root ? '<span class="badge root">this computer</span>' : ""}
-          ${n.reachable ? "" : '<span class="badge failed">unreachable</span>'}</td>
+          ${n.reachable ? "" : '<span class="badge failed">unreachable</span>'}
+          ${n.custom ? `<span class="badge custom" data-edit="${esc(n.name)}" title="${esc(n.custom.text + (n.custom.note ? " — " + n.custom.note : ""))}">custom</span>` : ""}</td>
       <td class="model" title="${esc(n.model)}">${esc(n.model)}</td>
       <td class="${old ? "fw-old" : ""}" title="${old ? "older than " + esc(latest) : ""}">${esc(n.firmware)}</td>
       <td>${n.hop ?? "–"}</td>
       <td class="${n.cuts_off.length ? "cut" : "muted"}" title="${esc(n.cuts_off.join(", "))}">${n.cuts_off.length ? n.cuts_off.length + " node" + (n.cuts_off.length > 1 ? "s" : "") : "–"}</td>
-      <td class="rf">${rf}</td></tr>`;
+      <td class="rf">${rf}</td>
+      <td class="own"><button class="ghost" data-edit="${esc(n.name)}" title="Settings for this node only">${n.custom ? "Edit" : "Set…"}</button></td></tr>`;
   }).join("");
   $("#chk-all").checked = rows.length > 0 && rows.every((n) => state.selected.has(n.name));
   $("#sel-count").textContent = state.selected.size;
@@ -115,6 +117,8 @@ function rfCell(n) {
 }
 
 $("#node-table tbody").addEventListener("click", (e) => {
+  const ed = e.target.closest("[data-edit]");
+  if (ed) { e.stopPropagation(); guarded(() => openNodeEditor(ed.dataset.edit)); return; }
   const tr = e.target.closest("tr[data-node]");
   if (!tr) return;
   toggle(tr.dataset.node);
@@ -214,100 +218,172 @@ async function loadRadioPanel() {
     box.innerHTML = '<p class="hint">No radio details for the selected nodes yet. Press <b>Read radios</b> (logs in over SSH, read-only).</p>';
     return;
   }
-  box.innerHTML = radioOpts.bands.map(bandHtml).join("");
-  $$(".band", box).forEach((el) => {
-    $$("select", el).forEach((s) => s.addEventListener("change", () => refreshBand(el)));
-    refreshBand(el);
-  });
+  mountBands(box, radioOpts.bands, { kind: "group" });
 }
 
 function nowLine(n, cur) {
   if (!cur) return "";
   const mesh = MESH.includes(cur.mode);
-  return `<span><b>${esc(n)}</b>: ${esc(MODE_NAMES[cur.mode] || cur.mode)}${mesh ? ` · ch ${esc(cur.label)} · ${cur.bandwidth} MHz` : ""}</span>`;
+  const node = state.topo.nodes.find((x) => x.name === n);
+  const own = node?.custom ? ` <span class="own-tag" title="${esc(node.custom.text)}">· own settings</span>` : "";
+  return `<span><b>${esc(n)}</b>: ${esc(MODE_NAMES[cur.mode] || cur.mode)}${mesh ? ` · ch ${esc(cur.label)} · ${cur.bandwidth} MHz · ${esc(ssidFull(cur.ssid || "AREDN", cur.mode, cur.channel, cur.bandwidth, ""))}` : ""}${own}</span>`;
 }
 
-function bandHtml(b) {
+// SSID as node-setup builds it: base-<bw>-v3 for Mesh (base-<ch>-<bw>-v3 on 900 MHz),
+// base-<ch>-<bw>-v3 for PtMP / PtP / Station.
+function ssidFull(base, mode, ch, bw, band) {
+  if (mode === "mesh" && !String(band).startsWith("900")) return `${base}-${bw}-v3`;
+  return `${base}-${ch}-${bw}-v3`;
+}
+
+// ctx.kind: "group" (bulk panel: blank = leave as is) or "node" (blank = use the group's setting)
+function bandHtml(b, ctx = { kind: "group" }) {
   const names = Object.keys(b.per_node);
-  const lines = names.slice(0, 6).map((n) => nowLine(n, b.per_node[n])).join("");
-  const more = names.length > 6 ? `<span>…and ${names.length - 6} more</span>` : "";
+  const lines = ctx.kind === "group"
+    ? names.slice(0, 6).map((n) => nowLine(n, b.per_node[n])).join("") + (names.length > 6 ? `<span>…and ${names.length - 6} more</span>` : "")
+    : nowLine(names[0], b.per_node[names[0]]);
   const curMode = b.current_mode;
-  const keep = curMode ? `Leave as is (${esc(MODE_NAMES[curMode] || curMode)})` : "Leave as is (mixed)";
-  const modeOpts = ["mesh", "meshap", "meshsta", "meshptp", "off"]
-    .map((m) => `<option value="${m}">${MODE_NAMES[m]}</option>`).join("");
-  const without = b.without.length ? `<p class="hint">No ${esc(b.band_label)} radio on: ${esc(b.without.join(", "))}. They're left alone.</p>` : "";
-  return `<div class="band" data-band="${esc(b.band)}">
-    <div class="band-head"><b>Radio ${esc(b.band_label)}</b><span class="muted small">${names.length} node${names.length > 1 ? "s" : ""}</span></div>
-    <div class="band-now">${lines}${more}</div>
+  const blank = ctx.kind === "node" ? "Group setting" : curMode ? `Leave as is (${esc(MODE_NAMES[curMode] || curMode)})` : "Leave as is (mixed)";
+  const modeOpts = ["mesh", "meshap", "meshsta", "meshptp", "off"].map((m) => `<option value="${m}">${MODE_NAMES[m]}</option>`).join("");
+  const without = ctx.kind === "group" && b.without.length ? `<p class="hint">No ${esc(b.band_label)} radio on: ${esc(b.without.join(", "))}. They're left alone.</p>` : "";
+  const curSsid = b.current_ssid;
+  return `<div class="band" data-band="${esc(b.band)}" data-kind="${ctx.kind}">
+    <div class="band-head"><b>Radio ${esc(b.band_label)}</b>${ctx.kind === "group" ? `<span class="muted small">${names.length} node${names.length > 1 ? "s" : ""}</span>` : ""}</div>
+    <div class="band-now">${lines}</div>
     <div class="grid2">
-      <label>Purpose <select data-k="mode"><option value="">${keep}</option>${modeOpts}</select></label>
+      <label>Purpose <select data-k="mode"><option value="">${blank}</option>${modeOpts}</select></label>
       <label>Channel width <select data-k="width"></select></label>
       <label class="wide">Channel <select data-k="channel"></select></label>
+      <label class="wide">Mesh SSID
+        <span class="ssid-row"><input data-k="ssid" maxlength="20" placeholder="${esc(ctx.kind === "node" ? "Group setting" : curSsid ? `Leave as is (${curSsid})` : "Leave as is")}"><span class="suffix"></span></span></label>
       <label class="wide peer hidden">Peer MAC (Mesh PtP) <input data-k="peer" placeholder="aa:bb:cc:dd:ee:ff"></label>
     </div>
     <p class="hint band-hint"></p>${without}</div>`;
 }
 
-function bandData(el) { return radioOpts.bands.find((b) => b.band === el.dataset.band); }
+function mountBands(container, bands, ctx, values = {}) {
+  container.innerHTML = bands.map((b) => bandHtml(b, ctx)).join("");
+  $$(".band", container).forEach((el) => {
+    el._band = bands.find((b) => b.band === el.dataset.band);
+    const v = values[el._band.band] || {};
+    if (v.mode) $('[data-k="mode"]', el).value = v.mode;
+    if (v.ssid) $('[data-k="ssid"]', el).value = v.ssid;
+    if (v.peer) $('[data-k="peer"]', el).value = v.peer;
+    el._initial = v;
+    $$("select, input", el).forEach((s) => s.addEventListener(s.tagName === "INPUT" ? "input" : "change", () => refreshBand(el)));
+    refreshBand(el);
+  });
+}
 
 function refreshBand(el) {
-  const b = bandData(el);
+  const b = el._band;
+  const nodeCtx = el.dataset.kind === "node";
   const modeSel = $('[data-k="mode"]', el), wSel = $('[data-k="width"]', el), cSel = $('[data-k="channel"]', el);
   const mode = modeSel.value || b.current_mode;           // effective mode after the change
   const meshy = mode && MESH.includes(mode);
   $(".peer", el).classList.toggle("hidden", mode !== "meshptp");
   const hint = $(".band-hint", el);
 
-  // Width: leave as is (when all nodes agree) or any width every node supports.
-  const wPrev = wSel.value;
+  // Width: blank (leave as is / group setting) or any width every node supports.
+  const wPrev = wSel.value || (el._initial?.width ? String(el._initial.width) : "");
   const curW = b.current ? b.current.width : null;
-  wSel.innerHTML = (curW ? `<option value="">Leave as is (${curW} MHz)</option>` : `<option value="">Leave as is</option>`)
-    + b.bws.map((w) => `<option value="${w}">${w} MHz</option>`).join("");
+  const wBlank = nodeCtx ? "Group setting" : curW ? `Leave as is (${curW} MHz)` : "Leave as is";
+  wSel.innerHTML = `<option value="">${wBlank}</option>` + b.bws.map((w) => `<option value="${w}">${w} MHz</option>`).join("");
   if ([...wSel.options].some((o) => o.value === wPrev)) wSel.value = wPrev;
   wSel.disabled = !meshy;
 
-  // Channel: exactly the node dialog's list for this mode and width, common to all selected nodes.
+  // Channel: exactly the node dialog's list for this mode and width, common to all nodes here.
   const width = wSel.value || (curW ? String(curW) : "");
   const table = b.channels[mode && mode !== "mesh" ? "managed" : "mesh"] || {};
   const opts = width ? (table[width] || []) : [];
-  const cPrev = cSel.value;
+  const cPrev = cSel.value || (el._initial?.channel != null ? String(el._initial.channel) : "");
+  el._initial = { ...el._initial, width: undefined, channel: undefined };
   const cur = b.current;
-  // Current channel stays selectable if it exists at the chosen width/mode on every node.
   const curOk = cur && opts.some((c) => c.number === cur.channel);
   const keepLabel = cur ? (opts.find((c) => c.number === cur.channel)?.label || cur.channel) : null;
   const sameWidth = !wSel.value || +wSel.value === cur?.width;
-  cSel.innerHTML = (curOk ? `<option value="">${sameWidth ? "Leave as is" : "Keep"} (${esc(keepLabel)})</option>` : `<option value="">— choose —</option>`)
-    + opts.map((c) => `<option value="${c.number}">${esc(c.label)}</option>`).join("");
+  const cBlank = nodeCtx ? "Group setting" : curOk ? `${sameWidth ? "Leave as is" : "Keep"} (${esc(keepLabel)})` : "— choose —";
+  cSel.innerHTML = `<option value="">${cBlank}</option>` + opts.map((c) => `<option value="${c.number}">${esc(c.label)}</option>`).join("");
   if ([...cSel.options].some((o) => o.value === cPrev)) cSel.value = cPrev;
   cSel.disabled = !meshy || !width;
 
-  hint.textContent = !meshy && mode !== "off"
-    ? `${MODE_NAMES[mode] || "This"} radios aren't changed here; choose a mesh purpose to use this radio for the mesh.`
+  // SSID preview: what the node will actually broadcast.
+  const ssidIn = $('[data-k="ssid"]', el);
+  const base = ssidIn.value.trim() || b.current_ssid || "AREDN";
+  const ch = cSel.value !== "" ? +cSel.value : cur?.channel;
+  const bw = wSel.value ? +wSel.value : cur?.width;
+  ssidIn.disabled = !meshy;
+  $(".suffix", el).textContent = meshy && bw ? `→ ${ssidFull(base, mode, ch ?? "?", bw, b.band)}` : "";
+  const badSsid = ssidIn.value && !/^[A-Za-z0-9_.-]{1,20}$/.test(ssidIn.value.trim());
+
+  hint.textContent = badSsid ? "SSID: up to 20 letters, digits, - _ or . (the node adds the rest)."
+    : !meshy && mode !== "off" && mode ? `${MODE_NAMES[mode] || "This"} radios aren't changed here; choose a mesh purpose to use this radio for the mesh.`
     : meshy && !width ? "These nodes use different widths; choose a width to see channels."
-    : meshy && !opts.length ? "No channel is available at this width on every selected node."
+    : meshy && !opts.length ? "No channel is available at this width on every node here."
     : "";
+}
+
+function bandValues(el) {
+  const num = (s) => (s === "" ? null : +s);
+  return {
+    band: el._band.band,
+    mode: $('[data-k="mode"]', el).value || null,
+    width: num($('[data-k="width"]', el).value),
+    channel: num($('[data-k="channel"]', el).value),
+    ssid: $('[data-k="ssid"]', el).value.trim() || null,
+    peer: $('[data-k="peer"]', el).value.trim() || null,
+  };
+}
+
+// ------------------------------------------------------------------ node-specific settings
+async function openNodeEditor(node) {
+  const opts = await api("/api/radio/options", { body: { nodes: [node] } });
+  if (!opts.bands.length) {
+    throw new Error(`Read ${node}'s radios first (select it and press Read radios)`);
+  }
+  const n = state.topo.nodes.find((x) => x.name === node);
+  const custom = n?.custom?.radio || {};
+  $("#ne-node").textContent = node;
+  $("#ne-note").value = n?.custom?.note || "";
+  mountBands($("#ne-bands"), opts.bands, { kind: "node" }, custom);
+  $("#ne-remove").classList.toggle("hidden", !n?.custom);
+  const d = $("#node-editor");
+  $("#ne-cancel").onclick = () => d.close();
+  $("#ne-remove").onclick = () => guarded(async () => {
+    await api(`/api/overrides/${encodeURIComponent(node)}`, { method: "DELETE" });
+    d.close(); toast(`${node} now follows the group`); await loadTopology();
+  });
+  $("#ne-save").onclick = () => guarded(async () => {
+    const radio = {};
+    $$("#ne-bands .band").forEach((el) => {
+      const v = bandValues(el);
+      if (v.mode || v.width !== null || v.channel !== null || v.ssid || v.peer) radio[v.band] = v;
+    });
+    await api(`/api/overrides/${encodeURIComponent(node)}`, { method: "PUT", body: { radio, note: $("#ne-note").value.trim() } });
+    d.close();
+    toast(Object.keys(radio).length ? `Saved own settings for ${node}` : `${node} now follows the group`);
+    await loadTopology();
+  });
+  d.showModal();
 }
 
 function radioChanges() {
   const out = [];
   for (const el of $$("#radio-bands .band")) {
-    const b = bandData(el);
-    const mode = $('[data-k="mode"]', el).value || null;
-    const width = $('[data-k="width"]', el).value ? +$('[data-k="width"]', el).value : null;
-    const cRaw = $('[data-k="channel"]', el).value;
-    const channel = cRaw === "" ? null : +cRaw;
-    const peer = $('[data-k="peer"]', el).value.trim() || null;
-    const effMode = mode || b.current_mode;
-    if (!mode && width === null && channel === null) continue;
+    const b = el._band;
+    const v = bandValues(el);
+    const effMode = v.mode || b.current_mode;
+    if (!v.mode && v.width === null && v.channel === null && !v.ssid) continue;
     const tableKey = effMode && effMode !== "mesh" ? "managed" : "mesh";
-    const w = width ?? b.current?.width;
+    const w = v.width ?? b.current?.width;
     const keepOk = b.current && (b.channels[tableKey][String(w)] || []).some((c) => c.number === b.current.channel);
-    if (MESH.includes(effMode) && channel === null && !keepOk) {
+    if (MESH.includes(effMode) && v.channel === null && !keepOk && (v.mode || v.width !== null)) {
       throw new Error(`Radio ${b.band_label}: choose a channel for the new settings`);
     }
-    out.push({ band: b.band, mode, width, channel, peer });
+    out.push(v);
   }
-  if (!out.length) throw new Error("Choose a purpose, width or channel to change");
+  const anyOwn = [...state.selected].some((n) => state.topo.nodes.find((x) => x.name === n)?.custom);
+  if (!out.length && !anyOwn) throw new Error("Choose a purpose, width, channel or SSID to change");
   return out;
 }
 
@@ -328,9 +404,10 @@ $("#btn-ra-go").addEventListener("click", () => guarded(async () => {
   const b = radioBody(false);
   const what = b.changes.map((c) => {
     const band = radioOpts.bands.find((x) => x.band === c.band).band_label;
-    const bits = [c.mode && MODE_NAMES[c.mode], c.channel !== null && `channel ${c.channel}`, c.width && `${c.width} MHz`].filter(Boolean);
+    const bits = [c.mode && MODE_NAMES[c.mode], c.channel !== null && `channel ${c.channel}`, c.width && `${c.width} MHz`, c.ssid && `SSID ${c.ssid}`].filter(Boolean);
     return `<li>Radio ${esc(band)}: ${esc(bits.join(", "))}</li>`;
-  }).join("");
+  }).join("") + b.nodes.map((n) => state.topo.nodes.find((x) => x.name === n)).filter((n) => n?.custom)
+    .map((n) => `<li><b>${esc(n.name)}</b> uses its own settings: ${esc(n.custom.text)}</li>`).join("");
   const ok = await confirmDialog(`Change radios on ${b.nodes.length} node(s)`,
     `<ol>${what}</ol><p>Nodes in each RF cluster switch at the same moment and reboot if AREDN needs it. Each node puts its old settings back after ${b.revert_after}s unless every node in its cluster is seen on the new settings with its RF neighbours.</p><p class="hint">Run the dry run first: it re-reads every radio and checks each choice against that node.</p>`, "switch");
   if (!ok) return;

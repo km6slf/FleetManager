@@ -42,7 +42,7 @@
             <th class="chk"><input type="checkbox" id="chk-all" title="Select all shown"></th>
             <th data-sort="name">Node</th><th data-sort="model">Model</th>
             <th data-sort="firmware">Firmware</th><th data-sort="hop">Hops</th>
-            <th data-sort="cuts">Only path to</th><th>RF</th>
+            <th data-sort="cuts">Only path to</th><th>Radios</th><th class="own">Own settings</th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -163,6 +163,21 @@
     </div>
   </section>
 </main>
+
+<dialog id="node-editor">
+  <form method="dialog" onsubmit="return false">
+    <h3>Own settings for <span id="ne-node"></span></h3>
+    <p class="hint">This node stays in the group. Whenever it's part of a radio change, anything set here replaces the group's value for it; the group fills in the rest. Lists come from this node's own radios.</p>
+    <div id="ne-bands"></div>
+    <label>Note (why this node is different) <input id="ne-note" maxlength="200" placeholder="e.g. PtP backhaul to the EOC on its own channel"></label>
+    <div class="row">
+      <button id="ne-remove" class="ghost danger-text" type="button">Remove own settings</button>
+      <span class="grow"></span>
+      <button id="ne-cancel" class="ghost" type="button">Cancel</button>
+      <button id="ne-save" class="primary" type="button">Save</button>
+    </div>
+  </form>
+</dialog>
 
 <dialog id="confirm">
   <form method="dialog">

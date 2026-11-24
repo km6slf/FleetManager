@@ -60,7 +60,7 @@ th.chk, td.chk { width: 28px; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: var(--bg); }
 tbody tr.sel { background: var(--sel); }
-td.model { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+td.model { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 td .sub { color: var(--muted); font-size: 12px; }
 .badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--bg); border: 1px solid var(--line); color: var(--muted); }
 .badge.root { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -123,3 +123,17 @@ dialog h3 { margin: 0; }
 .chip .bandtag { display: inline-block; min-width: 66px; font-weight: 600; color: var(--accent); }
 .chip.off { color: var(--muted); }
 td.rf { white-space: normal; }
+
+.badge.custom { background: #8250df; border-color: #8250df; color: #fff; cursor: pointer; }
+th.own, td.own { width: 1%; white-space: nowrap; text-align: right; }
+td.own button { padding: 2px 8px; font-size: 12px; }
+th, td { padding: 7px 6px; }
+.chip .bandtag { min-width: 58px !important; }
+th[data-sort="cuts"] { white-space: normal; width: 60px; }
+.band-now .own-tag { color: #8250df; font-weight: 600; }
+.ssid-row { display: flex; align-items: center; gap: 6px; }
+.ssid-row input { flex: 1; min-width: 0; }
+.ssid-row .suffix { color: var(--muted); font-size: 12px; white-space: nowrap; }
+#node-editor { width: 520px; }
+#ne-bands { display: flex; flex-direction: column; gap: 12px; max-height: 60vh; overflow: auto; }
+.danger-text { color: var(--danger); }

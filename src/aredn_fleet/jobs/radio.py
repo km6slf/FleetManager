@@ -111,6 +111,7 @@ class RadioInfo:
     bws: list[int]
     channels: dict[str, list[dict[str, Any]]]   # width -> [{number, label, frequency}]
     managed_oob: list[int] = field(default_factory=list)
+    ssid: str | None = None   # mesh SSID base ("AREDN"); only kept for mesh-mode radios
 
     def channel_options(self, mode: str, bw: int | str) -> list[dict[str, Any]]:
         """Exactly the options the node's own Channel dropdown shows for this mode and width."""
@@ -159,7 +160,7 @@ def _int_or_none(v: Any) -> int | None:
 
 
 def parse_radio_inventory(raw: str, caps: str = "unknown") -> NodeRadios:
-    """Parse RADIO_STATE_CMD output. SSIDs and keys are deliberately dropped."""
+    """Parse RADIO_STATE_CMD output. Keys and non-mesh SSIDs are deliberately dropped."""
     data = json.loads(raw)
     radios = []
     for i, r in enumerate(data.get("config") or []):
@@ -176,7 +177,9 @@ def parse_radio_inventory(raw: str, caps: str = "unknown") -> NodeRadios:
             mode=str(m.get("mode") or "off"),
             channel=_int_or_none(m.get("channel")), bandwidth=_int_or_none(m.get("bandwidth")),
             bws=[int(b) for b in (r.get("bws") or [])], channels=chans,
-            managed_oob=[int(x) for x in oob if _int_or_none(x) is not None]))
+            managed_oob=[int(x) for x in oob if _int_or_none(x) is not None],
+            # The base name of a *mesh* SSID isn't secret; a WAN client's SSID/key are dropped.
+            ssid=(str(m.get("ssid")) if m.get("mode") in MESH_MODES and m.get("ssid") else None)))
     multi = {"multi-mesh": True, "single-mesh": False}.get(caps.strip())
     return NodeRadios(radios, multi)
 
@@ -185,6 +188,18 @@ async def read_node_radios(session: NodeSession) -> NodeRadios:
     raw = (await session.run(RADIO_STATE_CMD)).stdout
     caps = (await session.run(CAPS_CMD)).stdout
     return parse_radio_inventory(raw, caps)
+
+
+SSID_RE = re.compile(r"[A-Za-z0-9_.-]{1,20}")
+DEFAULT_SSID = "AREDN"
+
+
+def full_ssid(base: str, mode: str, channel: int | None, width: int | None, band: str) -> str:
+    """The SSID node-setup builds: base-<bw>-v3 for Mesh (base-<ch>-<bw>-v3 on 900 MHz HaLow),
+    base-<ch>-<bw>-v3 for PtMP / PtP / Station."""
+    if mode == "mesh" and not band.startswith("900"):
+        return f"{base}-{width}-v3"
+    return f"{base}-{channel}-{width}-v3"
 
 
 # --------------------------------------------------------------------------- requested change
@@ -196,6 +211,7 @@ class BandChange:
     channel: int | None = None
     width: int | None = None
     peer: str | None = None         # required for meshptp
+    ssid: str | None = None         # mesh SSID base, e.g. "AREDN" (node appends -<bw>-v3)
 
     def validate(self) -> None:
         if self.mode is not None and self.mode not in SETTABLE_MODES:
@@ -204,8 +220,30 @@ class BandChange:
             raise ValueError(f"{self.band}: Mesh PtP needs the peer's MAC address")
         if self.peer and not re.fullmatch(r"[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}", self.peer):
             raise ValueError(f"{self.band}: peer must be a MAC address like aa:bb:cc:dd:ee:ff")
-        if self.mode is None and self.channel is None and self.width is None:
+        if self.ssid is not None and not SSID_RE.fullmatch(self.ssid):
+            raise ValueError(f"{self.band}: SSID must be 1-20 letters, digits, '-', '_' or '.' "
+                             f"(the node adds -<width>-v3)")
+        if self.mode is None and self.channel is None and self.width is None and self.ssid is None:
             raise ValueError(f"{self.band}: nothing to change")
+
+
+def merge_changes(group: list[BandChange], custom: dict[str, dict[str, Any]] | None) -> list[BandChange]:
+    """Group settings with a node's own settings laid over them, field by field.
+
+    ``custom`` is ``{band: {mode, channel, width, ssid, peer}}``. A node's own
+    value wins wherever it sets one; the group fills in the rest. Bands with
+    node settings but no group change are included too, so a node's own
+    settings are (re)applied whenever it's part of a radio job.
+    """
+    custom = custom or {}
+    out: dict[str, BandChange] = {c.band: c for c in group}
+    for band, vals in custom.items():
+        base = out.get(band, BandChange(band))
+        kw = {k: vals.get(k) if vals.get(k) is not None else getattr(base, k)
+              for k in ("mode", "channel", "width", "peer", "ssid")}
+        out[band] = BandChange(band, **kw)
+    return [c for c in out.values()
+            if any(getattr(c, k) is not None for k in ("mode", "channel", "width", "ssid"))]
 
 
 def validate_changes(changes: list[BandChange]) -> None:
@@ -224,6 +262,7 @@ class NodePlan:
     sets: list[tuple[int, str, str]] = field(default_factory=list)   # (radio index, key, value)
     expect: list[dict[str, Any]] = field(default_factory=list)        # live checks after switch
     notes: list[str] = field(default_factory=list)
+    final: dict[int, tuple] = field(default_factory=dict)             # radio index -> (mode, ch, bw, ssid)
 
 
 def plan_node(inv: NodeRadios, changes: list[BandChange]) -> NodePlan:
@@ -257,10 +296,19 @@ def plan_node(inv: NodeRadios, changes: list[BandChange]) -> NodePlan:
                                  f"{MODE_LABELS[mode]} mode on this radio")
             if mode_changed:
                 plan.sets.append((r.index, "mode", mode))
-                if r.mode not in MESH_MODES:
-                    # As the dialog does: a radio entering a mesh mode gets the mesh SSID
-                    # (otherwise a former WAN client's network name would leak into it).
-                    plan.sets.append((r.index, "ssid", "AREDN"))
+            # SSID base. Requested -> set it if different. A radio entering a mesh mode gets
+            # AREDN, as the dialog does (never a former WAN client's network name). Otherwise
+            # the node's current SSID is left alone, even if we couldn't read it, so a group
+            # on a non-standard SSID is never moved back to AREDN by accident.
+            if ch.ssid is not None:
+                ssid = ch.ssid
+                if ssid != r.ssid:
+                    plan.sets.append((r.index, "ssid", ssid))
+            elif r.mode not in MESH_MODES:
+                ssid = DEFAULT_SSID
+                plan.sets.append((r.index, "ssid", ssid))
+            else:
+                ssid = r.ssid
             if mode_changed or channel != r.channel:
                 plan.sets.append((r.index, "channel", str(int(channel))))
             if mode_changed or width != r.bandwidth:
@@ -269,10 +317,13 @@ def plan_node(inv: NodeRadios, changes: list[BandChange]) -> NodePlan:
                 plan.sets.append((r.index, "peer", ch.peer.lower()))
             if len(plan.sets) > before:
                 plan.expect.append({"iface": r.iface, "band": ch.band, "mode": mode,
-                                    "frequency": r.frequency(channel, width), "width": width})
+                                    "frequency": r.frequency(channel, width), "width": width,
+                                    "ssid": full_ssid(ssid, mode, channel, width, ch.band) if ssid else None})
+            plan.final[r.index] = (mode, channel, width, ssid)
         elif mode == "off" and mode_changed:
             plan.sets.append((r.index, "mode", "off"))
             plan.expect.append({"iface": r.iface, "band": ch.band, "mode": "off"})
+            plan.final[r.index] = ("off", None, None, None)
         final_modes[r.index] = mode
         if len(plan.sets) == before:
             plan.notes.append(f"{ch.band} already set that way")
@@ -280,6 +331,21 @@ def plan_node(inv: NodeRadios, changes: list[BandChange]) -> NodePlan:
         raise ValueError("this firmware can't run mesh on two radios at once "
                          "(AREDN's release candidate / nightly can)")
     return plan
+
+
+LINK_CLASS = {"mesh": "adhoc", "meshap": "ptmp", "meshsta": "ptmp", "meshptp": "ptp"}
+
+
+def link_signatures(inv: NodeRadios, plan: NodePlan | None = None) -> set[tuple]:
+    """What each mesh radio will look like on air: two nodes can link over RF only if
+    they share a signature (band, link type, channel, width, full SSID)."""
+    sigs = set()
+    for r in inv.radios:
+        mode, ch, bw, ssid = (plan.final.get(r.index) if plan and r.index in plan.final
+                              else (r.mode, r.channel, r.bandwidth, r.ssid or DEFAULT_SSID))
+        if mode in MESH_MODES:
+            sigs.add((r.band, LINK_CLASS[mode], ch, bw, full_ssid(ssid, mode, ch, bw, r.band)))
+    return sigs
 
 
 # --------------------------------------------------------------------------- clusters
@@ -408,6 +474,8 @@ def iw_state(output: str) -> dict[str, Any]:
         s["frequency"] = int(m.group(1))
     if m := re.search(r"width: (\d+) MHz", output):
         s["width"] = int(m.group(1))
+    if m := re.search(r"^\s*ssid (.+)$", output, re.M):
+        s["ssid"] = m.group(1).strip()
     return s
 
 
@@ -419,6 +487,9 @@ def expectation_met(exp: dict[str, Any], iw_out: str) -> bool:
         return False
     want = IW_TYPE.get(exp["mode"])
     if want and s.get("type") != want:
+        return False
+    # A station may not be associated yet (no ssid line); otherwise the SSID must match.
+    if exp.get("ssid") and s.get("ssid") not in (None, exp["ssid"]):
         return False
     # 5/10 MHz are a driver setting that iw may report as 20 MHz; only check >= 20.
     if exp.get("width", 0) >= 20 and s.get("width") not in (None, exp["width"]):
@@ -470,19 +541,30 @@ def describe(inv: NodeRadios) -> str:
     return "; ".join(parts)
 
 
-async def run_radio_change(cluster: list[str], changes: list[BandChange], connect: Connector,
-                           sysinfo: SysinfoFetch, cfg: RadioConfig | None = None,
-                           execute: bool = False,
+async def run_radio_change(cluster: list[str],
+                           changes: list[BandChange] | dict[str, list[BandChange]],
+                           connect: Connector, sysinfo: SysinfoFetch,
+                           cfg: RadioConfig | None = None, execute: bool = False,
                            sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                            now: Callable[[], float] = time.time,
                            log: Callable[..., None] = lambda *a, **k: None,
                            on_inventory: Callable[[str, NodeRadios], None] | None = None
                            ) -> RadioReport:
-    """Change one RF cluster together. Dry run (default) does only the read-only preflight."""
+    """Change one RF cluster together. Dry run (default) does only the read-only preflight.
+
+    ``changes`` is either one list for every node, or a per-node dict (group
+    settings already merged with each node's own settings; see ``merge_changes``).
+    """
     cfg = cfg or RadioConfig()
-    validate_changes(changes)
+    per_node = changes if isinstance(changes, dict) else {n: list(changes) for n in cluster}
+    if not any(per_node.get(n) for n in cluster):
+        raise ValueError("nothing to change")
+    for n in cluster:
+        if per_node.get(n):
+            validate_changes(per_node[n])
     results = {n: RadioNodeResult(n) for n in cluster}
     plans: dict[str, NodePlan] = {}
+    invs: dict[str, NodeRadios] = {}
 
     # ---- preflight (read-only)
     for n in cluster:
@@ -498,16 +580,20 @@ async def run_radio_change(cluster: list[str], changes: list[BandChange], connec
         except Exception as exc:  # noqa: BLE001
             r.status, r.detail = "failed", f"preflight: {exc}"
             continue
+        invs[n] = inv
         if on_inventory:
             on_inventory(n, inv)
         r.before = describe(inv)
+        if not per_node.get(n):
+            r.status, r.detail = "unchanged", "no settings to apply"
+            continue
         try:
-            plan = plan_node(inv, changes)
+            plan = plan_node(inv, per_node[n])
         except ValueError as exc:
             r.status, r.detail = "failed", str(exc)
             continue
         if not plan.sets:
-            r.status, r.detail = "unchanged", "; ".join(plan.notes) or "nothing to change"
+            r.status, r.detail = "unchanged", "; ".join(plan.notes) or "already set that way"
             continue
         if abs(node_time - now()) > cfg.max_clock_skew:
             r.status, r.detail = "failed", f"clock off by {node_time - now():+.0f}s; fix NTP first"
@@ -527,16 +613,30 @@ async def run_radio_change(cluster: list[str], changes: list[BandChange], connec
         return RadioReport(results, False, f"preflight failed on {', '.join(failed)}; nothing changed")
     if not plans:
         return RadioReport(results, False, "nothing to change on these nodes")
+
+    # Which RF links should exist afterwards? Two nodes keep a link only if they'll
+    # share a radio signature. Links a node's own settings deliberately drop are
+    # reported here and not waited for later.
+    sigs = {n: link_signatures(invs[n], plans.get(n)) for n in invs}
+    neighbours_before = {n: rf_neighbours(await sysinfo(n)) & set(cluster) for n in cluster}
+    expected: dict[str, set[str]] = {}
+    for n in plans:
+        keep = {m for m in neighbours_before[n] if m in sigs and sigs[n] & sigs[m]}
+        expected[n] = keep
+        dropped = neighbours_before[n] - keep
+        if dropped:
+            results[n].detail += f"; WILL LOSE RF LINK TO {', '.join(sorted(dropped))} (different settings)"
+
     if not execute:
         return RadioReport(results, False, "dry run")
 
     targets = sorted(plans)
-    neighbours_before = {n: rf_neighbours(await sysinfo(n)) & set(cluster) for n in targets}
 
     # ---- arm every node with the same apply time
     apply_at = int(now() + cfg.lead_seconds)
     log("-", "radio-arm", apply_at=apply_at, nodes=targets,
-        changes=[asdict(c) for c in changes])
+        changes={n: [asdict(c) for c in per_node[n]] for n in targets},
+        settings={n: plans[n].sets for n in targets})
     armed: list[str] = []
     for n in targets:
         script = build_apply_script(plans[n].sets, apply_at, cfg.revert_after)
@@ -588,7 +688,7 @@ async def run_radio_change(cluster: list[str], changes: list[BandChange], connec
                 why[n] = f"not reachable yet ({type(exc).__name__})"
                 continue
             if ok:
-                missing = neighbours_before[n] - rf_neighbours(await sysinfo(n))
+                missing = expected[n] - rf_neighbours(await sysinfo(n))
                 if missing:
                     why[n] = f"RF neighbours not back: {', '.join(sorted(missing))}"
                     continue

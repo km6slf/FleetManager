@@ -7,8 +7,9 @@ import subprocess
 import pytest
 
 from aredn_fleet.jobs.radio import (BandChange, RadioConfig, build_apply_script, cluster_warnings,
-                                    expectation_met, parse_radio_inventory, plan_node,
-                                    rf_clusters, run_radio_change, validate_changes)
+                                    expectation_met, full_ssid, link_signatures, merge_changes,
+                                    parse_radio_inventory, plan_node, rf_clusters,
+                                    run_radio_change, validate_changes)
 from aredn_fleet.topology import Topology
 from aredn_fleet.transport import CommandResult
 
@@ -71,7 +72,8 @@ def test_channel_options_match_the_node_dialog():
 def test_plan_channel_and_width_on_5ghz():
     p = plan_node(inv(), [BandChange("5GHz", channel=133, width=10)])
     assert p.sets == [(0, "channel", "133"), (0, "bandwidth", "10")]
-    assert p.expect == [{"iface": "wlan0", "band": "5GHz", "mode": "mesh", "frequency": 5665, "width": 10}]
+    assert p.expect == [{"iface": "wlan0", "band": "5GHz", "mode": "mesh", "frequency": 5665,
+                         "width": 10, "ssid": "AREDN-10-v3"}]
 
 
 def test_plan_rejects_channel_not_in_dialog_list():
@@ -231,7 +233,8 @@ CFG = RadioConfig(lead_seconds=30, revert_after=600, poll_interval=10)
 
 
 def go(fc, clock, execute=True, changes=(BandChange("5GHz", channel=133, width=10),)):
-    return asyncio.run(run_radio_change(sorted(fc.nodes), list(changes), fc.connect, fc.sysinfo,
+    ch = changes if isinstance(changes, dict) else list(changes)
+    return asyncio.run(run_radio_change(sorted(fc.nodes), ch, fc.connect, fc.sysinfo,
                                         CFG, execute=execute, sleep=clock.sleep, now=clock.now))
 
 
@@ -287,3 +290,92 @@ def test_two_radios_on_one_band_are_refused():
     two5 = {"config": [ONE_RADIO["config"][0], {**ONE_RADIO["config"][0], "iface": "wlan1"}]}
     with pytest.raises(ValueError, match="2 radios on 5 GHz"):
         plan_node(inv(two5, caps="multi-mesh"), [BandChange("5GHz", channel=149)])
+
+
+
+# --------------------------------------------------------------------------- SSIDs and node-specific settings
+
+def test_full_ssid_rules_match_node_setup():
+    assert full_ssid("AREDN", "mesh", 131, 10, "5GHz") == "AREDN-10-v3"
+    assert full_ssid("IDEC", "mesh", 131, 10, "5GHz") == "IDEC-10-v3"
+    assert full_ssid("AREDN", "mesh", 3, 2, "900MHz") == "AREDN-3-2-v3"       # HaLow adds the channel
+    assert full_ssid("AREDN", "meshsta", 149, 10, "5GHz") == "AREDN-149-10-v3"
+
+
+def test_mesh_ssid_kept_wan_ssid_dropped():
+    i = inv()
+    assert i.by_band("5GHz").ssid == "AREDN" and i.by_band("2.4GHz").ssid is None
+
+
+def test_custom_ssid_is_set_and_verified():
+    p = plan_node(inv(), [BandChange("5GHz", ssid="IDEC")])
+    assert p.sets == [(0, "ssid", "IDEC")]
+    assert p.expect[0]["ssid"] == "IDEC-20-v3"
+    exp = p.expect[0]
+    iw = "type IBSS\n\tssid AREDN-20-v3\n\tchannel 131 (5655 MHz), width: 20 MHz"
+    assert not expectation_met(exp, iw)
+    assert expectation_met(exp, iw.replace("AREDN-20", "IDEC-20"))
+
+
+def test_unknown_current_ssid_is_never_reset_to_aredn():
+    st = hap_state()
+    del st["config"][0]["mode"]["ssid"]                 # couldn't read it
+    p = plan_node(inv(st), [BandChange("5GHz", channel=149)])
+    assert not any(k == "ssid" for _, k, _ in p.sets)
+
+
+def test_entering_mesh_from_wan_uses_aredn_or_requested_ssid():
+    p = plan_node(inv(caps="multi-mesh"), [BandChange("2.4GHz", mode="mesh", channel=1, width=10)])
+    assert (1, "ssid", "AREDN") in p.sets
+    p = plan_node(inv(caps="multi-mesh"), [BandChange("2.4GHz", mode="mesh", channel=1, width=10, ssid="IDEC")])
+    assert (1, "ssid", "IDEC") in p.sets and (1, "ssid", "AREDN") not in p.sets
+
+
+def test_ssid_validation():
+    for bad in ["", "has space", "x" * 21, "semi;colon"]:
+        with pytest.raises(ValueError):
+            BandChange("5GHz", ssid=bad).validate()
+    BandChange("5GHz", ssid="IDEC-Net_2").validate()
+
+
+def test_merge_node_settings_over_group():
+    group = [BandChange("5GHz", channel=133, width=10, ssid="IDEC")]
+    merged = merge_changes(group, {"5GHz": {"channel": 149}, "2.4GHz": {"mode": "off"}})
+    by = {c.band: c for c in merged}
+    assert by["5GHz"] == BandChange("5GHz", channel=149, width=10, ssid="IDEC")   # node wins on channel
+    assert by["2.4GHz"] == BandChange("2.4GHz", mode="off")                        # node-only band
+    assert merge_changes(group, None) == group
+    assert merge_changes([], {}) == []
+
+
+def test_link_signatures_follow_channel_and_ssid():
+    a = inv()
+    pa = plan_node(a, [BandChange("5GHz", channel=133, width=10)])
+    pb = plan_node(inv(), [BandChange("5GHz", channel=133, width=10)])
+    pc = plan_node(inv(), [BandChange("5GHz", channel=149, width=10)])
+    pd = plan_node(inv(), [BandChange("5GHz", channel=133, width=10, ssid="IDEC")])
+    assert link_signatures(a, pa) & link_signatures(a, pb)
+    assert not link_signatures(a, pa) & link_signatures(a, pc)      # different channel
+    assert not link_signatures(a, pa) & link_signatures(a, pd)      # different SSID
+
+
+def test_node_with_own_channel_stays_in_group_and_split_is_expected():
+    clock = Clock()
+    fc = FakeCluster(["a", "b", "c"], clock)
+    group = [BandChange("5GHz", channel=133, width=10)]
+    per_node = {"a": group, "b": group,
+                "c": merge_changes(group, {"5GHz": {"channel": 149}})}   # c has its own channel
+    dry = go(fc, clock, execute=False, changes=per_node)
+    assert "WILL LOSE RF LINK TO a, b" in dry.results["c"].detail
+    rep = go(fc, clock, changes=per_node)
+    assert rep.confirmed, rep.reason                    # the intended split doesn't cause a revert
+    assert fc.ch == {"a": 133, "b": 133, "c": 149}
+
+
+def test_only_node_settings_no_group_change():
+    clock = Clock()
+    fc = FakeCluster(["a", "b"], clock)
+    rep = go(fc, clock, execute=False, changes={"a": [], "b": [BandChange("5GHz", channel=149)]})
+    assert rep.results["a"].status == "unchanged" and rep.results["b"].status == "would-change"
+    with pytest.raises(ValueError, match="nothing to change"):
+        go(fc, clock, execute=False, changes={"a": [], "b": []})

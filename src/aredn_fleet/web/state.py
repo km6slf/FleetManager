@@ -93,6 +93,7 @@ class AppState:
         self.topo_path = self.config_dir / "mesh.json"
         self.audit_path = self.config_dir / "audit.jsonl"
         self.known_hosts = self.config_dir / "known_hosts"
+        self.overrides_path = self.config_dir / "overrides.json"
         self.mirror = "https://downloads.arednmesh.org/"
         self.jobs = JobManager()
         self.topology = Topology()
@@ -104,6 +105,32 @@ class AppState:
         self.connector = None   # tests inject a fake; None means real SSH
         self.sysinfo = sysinfo_or_none
         self.load_topology()
+        self.overrides: dict[str, dict[str, Any]] = self._load_overrides()
+
+    # ---------------------------------------------------------------- node-specific settings
+    def _load_overrides(self) -> dict[str, dict[str, Any]]:
+        try:
+            return json.loads(self.overrides_path.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def set_override(self, node: str, radio: dict[str, dict[str, Any]], note: str = "") -> None:
+        clean = {b: {k: v for k, v in vals.items() if v not in (None, "")}
+                 for b, vals in radio.items()}
+        clean = {b: v for b, v in clean.items() if v}
+        if clean:
+            self.overrides[node] = {"radio": clean, "note": note, "updated": time.time()}
+        else:
+            self.overrides.pop(node, None)
+        self._save_overrides()
+
+    def delete_override(self, node: str) -> None:
+        self.overrides.pop(node, None)
+        self._save_overrides()
+
+    def _save_overrides(self) -> None:
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        self.overrides_path.write_text(json.dumps(self.overrides, indent=1))
 
     def connect_factory(self, creds: CredentialStore):
         if self.connector:
@@ -177,6 +204,7 @@ class AppState:
                 "channel": rf.get("channel"), "chanbw": rf.get("chanbw"), "rfmode": rf.get("mode"),
                 "neighbours": sorted(adj.get(n, ())),
                 "radios": radio_summary(self.radios.get(n)),
+                "custom": custom_summary(self.overrides.get(n)),
                 "radios_read_at": (self.radios.get(n) or {}).get("read_at"),
             })
         return {"root": self.root, "discovered_at": self.discovered_at, "nodes": nodes,
@@ -250,7 +278,7 @@ def radio_options(radios: dict[str, dict[str, Any]], nodes: list[str]) -> dict[s
         out.append({
             "band": band, "band_label": band_label(band), "nodes": sorted(b["nodes"]),
             "per_node": {n: next(({"mode": r.mode, "channel": r.channel, "bandwidth": r.bandwidth,
-                                   "label": r.label(r.channel, r.bandwidth)}
+                                   "label": r.label(r.channel, r.bandwidth), "ssid": r.ssid}
                                   for r in known[n].radios if r.band == band), None)
                          for n in sorted(b["nodes"])},
             "without": sorted(set(known) - set(b["nodes"])),
@@ -258,7 +286,32 @@ def radio_options(radios: dict[str, dict[str, Any]], nodes: list[str]) -> dict[s
             "current": ({"channel": next(iter(chans))[0], "width": next(iter(chans))[1]}
                         if len(chans) == 1 else None),
             "current_mode": next(iter(modes)) if len(modes) == 1 else None,
+            "current_ssid": (next(iter(ss)) if len(ss := {r.ssid for r in rs if r.mode in MESH_MODES})
+                             == 1 else None),
         })
     multi = [inv.multi_mesh for inv in known.values()]
     return {"bands": out, "missing": missing,
             "multi_mesh": all(m is True for m in multi) if multi else False}
+
+
+def custom_summary(ov: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Short description of a node's own settings, for the list marker and tooltips."""
+    if not ov:
+        return None
+    from ..jobs.radio import MODE_LABELS, band_label
+    parts = []
+    for band, v in ov.get("radio", {}).items():
+        bits = []
+        if v.get("mode"):
+            bits.append(MODE_LABELS.get(v["mode"], v["mode"]))
+        if v.get("channel") is not None:
+            bits.append(f"channel {v['channel']}")
+        if v.get("width"):
+            bits.append(f"{v['width']} MHz")
+        if v.get("ssid"):
+            bits.append(f"SSID {v['ssid']}")
+        if v.get("peer"):
+            bits.append(f"peer {v['peer']}")
+        parts.append(f"{band_label(band)}: {', '.join(bits)}")
+    return {"text": "; ".join(parts), "note": ov.get("note", ""), "radio": ov.get("radio", {}),
+            "updated": ov.get("updated")}

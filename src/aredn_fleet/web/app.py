@@ -71,11 +71,12 @@ class BandChangeReq(BaseModel):
     channel: int | None = None
     width: int | None = None
     peer: str | None = None
+    ssid: str | None = None
 
 
 class RadioReq(BaseModel):
     nodes: list[str]
-    changes: list[BandChangeReq]
+    changes: list[BandChangeReq] = []
     revert_after: int = 600
     execute: bool = False
     confirm: str = ""
@@ -83,6 +84,11 @@ class RadioReq(BaseModel):
 
 class NodesReq(BaseModel):
     nodes: list[str]
+
+
+class OverrideReq(BaseModel):
+    radio: dict[str, BandChangeReq | dict] = {}
+    note: str = ""
 
 
 # ---------------------------------------------------------------- app
@@ -357,9 +363,17 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
         if req.execute and req.confirm.strip().lower() != "switch":
             raise HTTPException(400, "type 'switch' to confirm")
-        changes = [BandChange(c.band, c.mode, c.channel, c.width, c.peer) for c in req.changes]
+        from ..jobs.radio import merge_changes
+
+        group = [BandChange(c.band, c.mode, c.channel, c.width, c.peer, c.ssid) for c in req.changes]
+        per_node = {n: merge_changes(group, (state.overrides.get(n) or {}).get("radio"))
+                    for n in req.nodes}
+        if not any(per_node.values()):
+            raise HTTPException(400, "nothing to change: choose a setting, or give nodes their own settings")
         try:
-            validate_changes(changes)
+            for lst in per_node.values():
+                if lst:
+                    validate_changes(lst)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         selected = set(req.nodes)
@@ -369,14 +383,21 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             creds = state.creds()
             for w in cluster_warnings(state.topology, selected):
                 job.log(w, "warn")
+            for n in sorted(selected):
+                if state.overrides.get(n):
+                    from .state import custom_summary
+                    job.log(f"{n} has its own settings: {custom_summary(state.overrides[n])['text']}")
             log = AuditLog(state.audit_path)
             for i, c in enumerate(clusters, 1):
                 if job.stop_requested:
                     job.log("stopped before the next cluster", "warn")
                     break
                 job.log(f"RF cluster {i}: {', '.join(c)}")
+                if not any(per_node[n] for n in c):
+                    job.log(f"RF cluster {i}: nothing to change")
+                    continue
                 rep = await run_radio_change(
-                    c, changes, state.connect_factory(creds), state.sysinfo,
+                    c, {n: per_node[n] for n in c}, state.connect_factory(creds), state.sysinfo,
                     RadioConfig(revert_after=req.revert_after), execute=req.execute, log=log,
                     on_inventory=state.set_radios)
                 for r in rep.results.values():
@@ -395,6 +416,48 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
         title = f"{'Radio change' if req.execute else 'Radio dry run'} ({len(req.nodes)} nodes)"
         return start("radio", title, req.execute, body)
+
+    # ------------------------------------------------------------ node-specific settings
+    @app.get("/api/overrides")
+    async def overrides_list():
+        return {"overrides": state.overrides}
+
+    @app.put("/api/overrides/{node}")
+    async def overrides_set(node: str, req: OverrideReq):
+        from ..jobs.radio import BandChange, NodeRadios, plan_node
+
+        if node not in state.topology.nodes:
+            raise HTTPException(404, f"unknown node {node}")
+        radio = {}
+        changes = []
+        for band, v in req.radio.items():
+            d = v.model_dump() if hasattr(v, "model_dump") else dict(v)
+            d = {k: d.get(k) for k in ("mode", "channel", "width", "ssid", "peer")}
+            if all(x in (None, "") for x in d.values()):
+                continue
+            c = BandChange(band, d["mode"] or None, d["channel"], d["width"], d["peer"] or None,
+                           d["ssid"] or None)
+            try:
+                c.validate()
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            radio[band] = d
+            changes.append(c)
+        if changes:
+            inv = state.radios.get(node)
+            if not inv:
+                raise HTTPException(400, f"read {node}'s radios first, so its settings can be checked")
+            try:
+                plan_node(NodeRadios.from_json(inv), changes)   # same checks a real change gets
+            except ValueError as exc:
+                raise HTTPException(400, f"{node}: {exc}") from exc
+        state.set_override(node, radio, req.note)
+        return {"ok": True, "custom": state.overrides.get(node)}
+
+    @app.delete("/api/overrides/{node}")
+    async def overrides_delete(node: str):
+        state.delete_override(node)
+        return {"ok": True}
 
     # ------------------------------------------------------------ jobs
     @app.get("/api/jobs")

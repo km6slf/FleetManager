@@ -175,3 +175,49 @@ def test_starts_without_console_streams(tmp_path):
     subprocess.run([sys.executable, "-c", code, str(marker)], env=env, timeout=60, check=True)
     assert marker.read_text() == "ok"
     assert (tmp_path / "home/config/logs/fleet-manager.log").exists()
+
+
+def _hap(ch=131, bw=10, ssid="AREDN"):
+    five = {"10": [_c(131, 5655), _c(133, 5665), _c(149, 5745)], "20": [_c(131, 5655), _c(149, 5745)]}
+    return {"config": [{"iface": "wlan0", "mode": {"mode": "mesh", "channel": ch, "bandwidth": bw, "ssid": ssid},
+                        "def": {"band": "5GHz"}, "bws": [10, 20], "channels": five}]}
+
+
+def test_node_specific_settings_roundtrip_and_marker(client):
+    from aredn_fleet.jobs.radio import parse_radio_inventory
+    st = client.state
+    # can't save before the node's radios are known
+    r = client.put("/api/overrides/far1", json={"radio": {"5GHz": {"channel": 149}}})
+    assert r.status_code == 400 and "read far1's radios" in r.json()["detail"]
+    st.set_radios("far1", parse_radio_inventory(json.dumps(_hap()), "single-mesh"))
+    # checked against the node's own channel list
+    r = client.put("/api/overrides/far1", json={"radio": {"5GHz": {"channel": 132}}})
+    assert r.status_code == 400 and "isn't offered" in r.json()["detail"]
+    r = client.put("/api/overrides/far1", json={"radio": {"5GHz": {"ssid": "bad ssid"}}})
+    assert r.status_code == 400 and "SSID" in r.json()["detail"]
+    r = client.put("/api/overrides/far1", json={"radio": {"5GHz": {"channel": 149, "ssid": "IDEC"}},
+                                                 "note": "PtP backhaul"})
+    assert r.status_code == 200
+    far1 = next(n for n in client.get("/api/topology").json()["nodes"] if n["name"] == "far1")
+    assert far1["custom"]["text"] == "5 GHz: channel 149, SSID IDEC" and far1["custom"]["note"] == "PtP backhaul"
+    # survives a restart (stored separately from discovery)
+    assert AppState(fw_dir=st.fw_dir, config_dir=st.config_dir).overrides["far1"]["radio"]["5GHz"]["channel"] == 149
+    # empty settings = back to following the group
+    client.put("/api/overrides/far1", json={"radio": {"5GHz": {}}})
+    assert "far1" not in st.overrides
+
+
+def test_radio_job_allows_only_node_settings_but_not_nothing(client):
+    from aredn_fleet.jobs.radio import parse_radio_inventory
+    st = client.state
+    r = client.post("/api/radio", json={"nodes": ["far1", "far2"], "changes": []})
+    assert r.status_code == 400 and "nothing to change" in r.json()["detail"]
+    st.set_radios("far1", parse_radio_inventory(json.dumps(_hap()), "single-mesh"))
+    client.put("/api/overrides/far1", json={"radio": {"5GHz": {"channel": 149}}})
+    r = client.post("/api/radio", json={"nodes": ["far1", "far2"], "changes": []})
+    assert r.status_code == 200          # far1's own settings make it a real job (dry run)
+
+
+def test_group_ssid_is_validated(client):
+    r = client.post("/api/radio", json={"nodes": ["far1"], "changes": [{"band": "5GHz", "ssid": "no spaces allowed"}]})
+    assert r.status_code == 400 and "SSID" in r.json()["detail"]

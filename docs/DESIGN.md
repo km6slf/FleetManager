@@ -99,7 +99,30 @@ The job (`aredn-fleet radio`):
 * **Verification** after the switch is live:
   * `iw dev <iface> info` must show the expected frequency and interface type. Widths of 5 and 10 MHz are driver settings that iw reports as 20, so width is only checked at 20 MHz and up.
   * Every RF neighbour the node had before must be back.
+* **Mesh SSID:** `radioN_ssid` holds only the base name (default `AREDN`), and `node-setup` adds the rest:
+  * `<base>-<width>-v3` for Mesh,
+  * `<base>-<channel>-<width>-v3` for Mesh PtMP, PtP, Station, and Mesh on 900 MHz.
+
+  Groups on a non-standard SSID, such as IDEC, can set the base group-wide or per node, and the GUI previews the full SSID. Base names are limited to 1–20 letters, digits, `-`, `_` and `.`.
+  * A mesh radio's SSID is **never reset** unless asked. If it can't be read, it's left alone rather than "restored" to `AREDN`.
+  * A radio entering a mesh mode gets `AREDN`, or the requested base. It never keeps a former WAN client's network name.
+  * Verification checks the broadcast SSID with `iw`.
 * See `docs/NIGHTLY.md` for the release-candidate features: multi-radio mesh, multi-channel stations, internet bypass and more.
+
+## Node-specific settings
+* Any node can have its own radio settings per band: purpose, width, channel, SSID base and peer, plus a note saying why. They're stored in `config/overrides.json`, separate from discovery, so rediscovering doesn't lose them.
+* The node **stays in the group**. Whenever it's part of a radio job, its own values replace the group's field by field, and the group fills in the rest (`merge_changes`). Bands with only node settings are included too.
+* The settings are applied idempotently: a node already set that way is "unchanged", so a job with no group change can be run just to apply node settings.
+* Saving checks node settings against the node's own radios, with the same rules as a real change. Saving requires the node's radios to have been read.
+* **Expected links:** each radio's on-air signature after the change is band, link type (ad-hoc / PtMP / PtP), channel, width and full SSID. Two nodes keep an RF link only if they share a signature.
+  * Links a node's own settings deliberately drop are listed in the dry run ("WILL LOSE RF LINK TO …").
+  * The job doesn't wait for those links, so an intended split never triggers a revert. It still requires every link that *should* exist.
+* **GUI:**
+  * a purple **custom** marker next to the node name, with a tooltip summarising its settings and note;
+  * an **Own settings** column with Set… / Edit;
+  * an editor that reuses the band controls with the node's own lists, where blank means "group setting";
+  * "· own settings" on that node's line in the radio panel;
+  * the confirm dialog lists every node that will use its own settings.
 
 ## Field findings — bench node (MikroTik hAP ac lite, AREDN 4.26.1.0)
 * Board name is `mikrotik,routerboard-952ui-5ac2nd` (from `/tmp/sysinfo/board_name`) and the target is `ath79/mikrotik`.
@@ -175,6 +198,8 @@ The job (`aredn-fleet radio`):
 * [ ] First real upgrade on the bench node (4.26.1.0 → 4.26.10.0)
 * [x] Radio settings job (synchronized switch per RF cluster, on-node auto-revert via pushed script; simulated-cluster tests)
 * [x] Per-band radio settings for 1- and 2-radio nodes (900 MHz, 2.4, 3.4, 5, 6 GHz), channel lists identical to the node's own dialog, multi-mesh probe
+* [x] Editable mesh SSID (group or per node) with live preview; never reset implicitly
+* [x] Node-specific settings that stay in the group, with list marker, editor, merge, and expected-link logic
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)
 * [ ] Nightly: run `tools/recon/recon-nightly.sh`, then multi-channel stations and the bulk settings job (internet bypass/sharing)
 * [ ] Package the revert script as the optional .ipk agent
