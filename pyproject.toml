@@ -13,11 +13,15 @@ dependencies = []
 
 [project.optional-dependencies]
 ssh = ["asyncssh>=2.14"]
-web = ["fastapi>=0.110", "uvicorn>=0.29", "jinja2>=3.1"]
-dev = ["pytest>=8"]
+gui = ["fastapi>=0.110", "uvicorn>=0.29", "keyring>=24", "pywebview>=5.0", "asyncssh>=2.14"]
+serve = ["fastapi>=0.110", "uvicorn>=0.29", "keyring>=24", "asyncssh>=2.14"]
+dev = ["pytest>=8", "httpx>=0.27", "fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
 aredn-fleet = "aredn_fleet.cli:main"
+
+[project.gui-scripts]
+aredn-fleet-gui = "aredn_fleet.desktop:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aredn_fleet"]

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 import subprocess
 
@@ -43,6 +44,7 @@ def test_change_validation():
     RadioChange(mode="meshptp", peer="08:55:31:0c:73:56").validate()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="needs a POSIX sh")
 def test_script_is_valid_shell():
     s = build_apply_script(0, RadioChange(channel=133, bandwidth=10), 2_000_000_000, 600)
     subprocess.run(["sh", "-n"], input=s, text=True, check=True)

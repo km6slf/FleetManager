@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AREDN Fleet Manager</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="/static/favicon.png">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2"><circle cx="16" cy="16" r="3"/><circle cx="5" cy="8" r="2.5"/><circle cx="27" cy="8" r="2.5"/><circle cx="8" cy="26" r="2.5"/><circle cx="25" cy="25" r="2.5"/><path d="M13.5 14.5 7 9.5M18.5 14.5 25 9.5M14 18.5 9.5 24M18 18.5l5 5"/></g></svg>
+    <div><b>Fleet Manager</b><span>Safe, bulk updating of AREDN nodes</span></div>
+  </div>
+  <nav id="tabs">
+    <button data-tab="nodes" class="active">Nodes</button>
+    <button data-tab="map">Map</button>
+    <button data-tab="firmware">Firmware</button>
+    <button data-tab="creds">Credentials</button>
+    <button data-tab="activity">Activity <span id="activity-dot" class="dot hidden"></span></button>
+  </nav>
+  <div class="meta"><span id="portable" class="badge hidden">portable</span><span id="version"></span></div>
+</header>
+
+<main>
+  <!-- ======================= NODES ======================= -->
+  <section id="tab-nodes" class="tab active">
+    <div class="toolbar">
+      <label class="inline">Start at <input id="disc-start" value="localnode" size="14"></label>
+      <button id="btn-discover" class="primary">Discover mesh</button>
+      <span id="disc-age" class="muted"></span>
+      <span class="grow"></span>
+      <input id="filter" type="search" placeholder="Filter by name, model, firmware…" size="28">
+      <button id="sel-all" class="ghost">Select shown</button>
+      <button id="sel-none" class="ghost">Clear</button>
+    </div>
+    <div class="split">
+      <div class="panel table-wrap">
+        <table id="node-table">
+          <thead><tr>
+            <th class="chk"><input type="checkbox" id="chk-all" title="Select all shown"></th>
+            <th data-sort="name">Node</th><th data-sort="model">Model</th>
+            <th data-sort="firmware">Firmware</th><th data-sort="hop">Hops</th>
+            <th data-sort="cuts">Only path to</th><th>RF</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="empty-nodes" class="empty">No mesh discovered yet. Plug into a node and press <b>Discover mesh</b>.</div>
+      </div>
+
+      <aside class="panel actions">
+        <h3><span id="sel-count">0</span> selected</h3>
+
+        <div class="card">
+          <h4>Firmware upgrade</h4>
+          <div class="grid2">
+            <label>Version <select id="up-version"></select></label>
+            <label>At once <input id="up-parallel" type="number" min="1" max="8" value="1"></label>
+            <label>Soak between waves (s) <input id="up-soak" type="number" min="0" value="180"></label>
+            <label class="check wide"><input id="up-notun" type="checkbox"> Don't count on tunnel links during the rollout</label>
+          </div>
+          <div class="row">
+            <button id="btn-plan" class="ghost">Preview order</button>
+            <button id="btn-up-dry">Dry run</button>
+            <button id="btn-up-go" class="danger">Upgrade…</button>
+          </div>
+          <div id="plan-out"></div>
+        </div>
+
+        <div class="card">
+          <h4>Radio settings</h4>
+          <p class="hint">Each RF cluster switches together and reverts on its own unless confirmed.</p>
+          <div class="grid2">
+            <label>Channel <input id="ra-channel" type="number" placeholder="unchanged"></label>
+            <label>Width (MHz) <select id="ra-width"><option value="">unchanged</option><option>5</option><option>10</option><option>20</option><option>40</option><option>80</option></select></label>
+            <label>Mode <select id="ra-mode"><option value="">unchanged</option><option value="mesh">Mesh</option><option value="meshap">Mesh PtMP (AP)</option><option value="meshsta">Mesh PtMP (station)</option><option value="meshptp">Mesh PtP</option></select></label>
+            <label>Revert after (s) <input id="ra-revert" type="number" min="120" value="600"></label>
+            <label id="ra-peer-wrap" class="hidden">Peer MAC <input id="ra-peer" placeholder="aa:bb:cc:dd:ee:ff"></label>
+          </div>
+          <div class="row">
+            <button id="btn-ra-dry">Dry run</button>
+            <button id="btn-ra-go" class="danger">Switch…</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ======================= MAP ======================= -->
+  <section id="tab-map" class="tab">
+    <div class="toolbar">
+      <span class="muted">Columns are hops from the node this computer is attached to. Click a node to select it. Red ring = the only path to other nodes.</span>
+      <span class="grow"></span>
+      <span class="legend"><i class="l-rf"></i>RF <i class="l-dtd"></i>DTD <i class="l-tun"></i>Tunnel</span>
+    </div>
+    <div class="panel map-wrap"><svg id="map"></svg><div id="empty-map" class="empty">Discover the mesh to see the map.</div></div>
+  </section>
+
+  <!-- ======================= FIRMWARE ======================= -->
+  <section id="tab-firmware" class="tab">
+    <div class="split">
+      <div class="panel">
+        <h3>Downloaded</h3>
+        <table id="fw-table"><thead><tr><th>Channel</th><th>Version</th><th>Hardware</th><th>Images</th></tr></thead><tbody></tbody></table>
+        <div id="fw-empty" class="empty">Nothing downloaded yet.</div>
+        <p class="muted small" id="fw-dir"></p>
+      </div>
+      <aside class="panel actions">
+        <h3>Get firmware</h3>
+        <div class="card">
+          <p class="hint">From the AREDN Firmware Selector. Every image is checked against its published SHA-256.</p>
+          <div id="fw-channels" class="muted small">Checking what's available…</div>
+          <fieldset>
+            <label class="check"><input type="radio" name="scope" value="mesh" checked> Hardware in my mesh</label>
+            <label class="check"><input type="radio" name="scope" value="all"> All hardware (≈100 models, several GB)</label>
+            <label class="check"><input type="radio" name="scope" value="board"> These board names:</label>
+            <input id="fw-boards" placeholder="mikrotik,routerboard-952ui-5ac2nd">
+          </fieldset>
+          <div class="grid2">
+            <label>Stable releases <input id="fw-stable" type="number" min="1" max="5" value="2"></label>
+            <label class="check"><input id="fw-nightly" type="checkbox" checked> Latest nightly</label>
+            <label class="check wide"><input id="fw-factory" type="checkbox"> First-install (factory) images too</label>
+          </div>
+          <div class="row"><button id="btn-fetch" class="primary">Download</button></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ======================= CREDENTIALS ======================= -->
+  <section id="tab-creds" class="tab">
+    <div class="split">
+      <div class="panel">
+        <h3>Logins tried on each node</h3>
+        <p class="hint">Keys are tried before passwords. Once one works on a node it's tried first there next time. Nodes are reached over SSH on port 2222 as root.</p>
+        <table id="cred-table"><thead><tr><th>Label</th><th>Type</th><th>Where it's kept</th><th>Works on</th><th></th></tr></thead><tbody></tbody></table>
+        <div id="cred-empty" class="empty">No logins yet. Add an SSH key or a node password.</div>
+      </div>
+      <aside class="panel actions">
+        <h3>Add a login</h3>
+        <div class="card">
+          <label>Label <input id="cr-label" placeholder="e.g. club-key"></label>
+          <fieldset>
+            <label class="check"><input type="radio" name="crkind" value="key" checked> SSH private key file</label>
+            <label class="check"><input type="radio" name="crkind" value="password"> Node password</label>
+          </fieldset>
+          <label id="cr-key-wrap">Key file path <input id="cr-key" placeholder="C:\Users\you\.ssh\aredn"></label>
+          <label id="cr-pw-wrap" class="hidden">Password <input id="cr-pw" type="password" autocomplete="off"></label>
+          <p class="hint">Passwords go to your operating system's credential store, never into the app's files.</p>
+          <div class="row"><button id="btn-cred-add" class="primary">Add</button></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ======================= ACTIVITY ======================= -->
+  <section id="tab-activity" class="tab">
+    <div class="split activity">
+      <div class="panel"><h3>Jobs</h3><ul id="job-list"></ul><div id="job-empty" class="empty">Nothing has run yet.</div></div>
+      <div class="panel log-panel">
+        <div class="toolbar"><h3 id="job-title">—</h3><span id="job-status" class="badge"></span><span class="grow"></span><button id="btn-stop" class="danger hidden">Stop</button></div>
+        <div id="log"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog id="confirm">
+  <form method="dialog">
+    <h3 id="cf-title"></h3>
+    <div id="cf-body"></div>
+    <label>Type <b id="cf-word"></b> to continue <input id="cf-input" autocomplete="off"></label>
+    <div class="row"><button value="cancel" class="ghost">Cancel</button><button id="cf-ok" value="ok" class="danger" disabled>Go</button></div>
+  </form>
+</dialog>
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

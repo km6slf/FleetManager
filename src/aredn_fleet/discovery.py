@@ -86,6 +86,7 @@ class DiscoveryResult:
     topology: Topology
     nodes: dict[str, NodeInfo]
     errors: dict[str, str]
+    start: str = ""  # real name of the node discovery started from (the manager's root)
 
 
 def crawl(start: str = "localnode", fetch: Fetcher = http_fetch, workers: int = 8,
@@ -137,4 +138,4 @@ def crawl(start: str = "localnode", fetch: Fetcher = http_fetch, workers: int = 
     for link in topo.links:
         uniq.setdefault((frozenset((link.a, link.b)), link.kind), link)
     topo.links = list(uniq.values())
-    return DiscoveryResult(topo, nodes, errors)
+    return DiscoveryResult(topo, nodes, errors, first.name)

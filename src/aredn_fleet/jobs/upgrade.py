@@ -258,7 +258,8 @@ async def run_rollout(plan: Plan, release: Release, store: FirmwareStore, connec
                       execute: bool = False, audit: Path | None = None,
                       sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                       clock: Callable[[], float] = time.monotonic,
-                      on_result: Callable[[NodeResult], None] | None = None) -> RolloutReport:
+                      on_result: Callable[[NodeResult], None] | None = None,
+                      should_stop: Callable[[], bool] | None = None) -> RolloutReport:
     cfg = cfg or UpgradeConfig()
     log = AuditLog(audit)
     log("-", "rollout-start", execute=execute, version=release.version, waves=plan.waves)
@@ -266,6 +267,10 @@ async def run_rollout(plan: Plan, release: Release, store: FirmwareStore, connec
     finished: list[str] = []
 
     for i, wave in enumerate(plan.waves):
+        if should_stop and should_stop():
+            reason = f"stopped by operator before wave {i + 1}"
+            log("-", "rollout-stopped", reason=reason)
+            return RolloutReport(results, True, reason)
         jobs = [NodeUpgrade(n, release, store, connect, sysinfo, cfg, log,
                             plan.dependents.get(n, set()), sleep, clock) for n in wave]
         wave_results = await asyncio.gather(*(j.run(execute) for j in jobs))

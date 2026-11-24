@@ -13,9 +13,11 @@ from .discovery import crawl, http_fetch
 from .firmware import DEFAULT_BASE, Catalog, FirmwareStore, select_channels
 from .topology import Topology, plan_rollout
 
-CONFIG_DIR = Path.home() / ".config" / "aredn-fleet"
-FW_DIR = Path.home() / ".cache" / "aredn-fleet" / "firmware"
-CREDS = CONFIG_DIR / "credentials.json"
+from . import paths
+
+CONFIG_DIR = paths.config_dir()
+FW_DIR = paths.firmware_dir()
+CREDS = paths.credentials_file()
 
 
 def _load_snapshot(path: Path) -> Topology:
@@ -299,6 +301,15 @@ def main(argv: list[str] | None = None) -> int:
     ra.add_argument("--execute", action="store_true")
     ra.add_argument("--yes", action="store_true")
     ra.set_defaults(func=cmd_radio)
+
+    g = sub.add_parser("gui", help="open the desktop app")
+    g.set_defaults(func=lambda a: __import__("aredn_fleet.desktop", fromlist=["main"]).main())
+    sv = sub.add_parser("serve", help="run the web UI headless (e.g. on a Pi on the mesh)")
+    sv.add_argument("--host", default="127.0.0.1",
+                    help="address to listen on; 0.0.0.0 to allow other machines")
+    sv.add_argument("--port", type=int, default=8787)
+    sv.set_defaults(func=lambda a: __import__("aredn_fleet.desktop", fromlist=["serve"]).serve(
+        a.host, a.port))
 
     args = p.parse_args(argv)
     return args.func(args)

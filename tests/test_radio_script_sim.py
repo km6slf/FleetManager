@@ -14,7 +14,8 @@ import pytest
 
 from aredn_fleet.jobs.radio import RadioChange, build_apply_script
 
-pytestmark = pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+pytestmark = pytest.mark.skipif(os.name == "nt" or shutil.which("sh") is None,
+                                reason="needs a POSIX sh (the script runs on AREDN nodes, not Windows)")
 
 
 def setup_sim(root, reboot_needed):

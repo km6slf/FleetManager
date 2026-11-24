@@ -1,0 +1,13 @@
+AREDN Fleet Manager - portable mode
+
+Because this file is next to AREDN-Fleet-Manager.exe, the app keeps its
+settings, login list, pinned node keys and downloaded firmware in the "data"
+folder beside it instead of in your Windows profile. Copy the whole folder
+to a USB stick to take it with you. Delete this file to use the normal
+per-user locations instead.
+
+Node passwords you add in the app are still stored in Windows Credential
+Manager on the computer you add them on, never in the data folder. SSH key
+files are referenced by path.
+
+Requires the Microsoft Edge WebView2 runtime (included with Windows 10 and 11).

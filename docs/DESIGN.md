@@ -115,9 +115,30 @@ The job (`aredn-fleet radio`):
 * Planned: a job that pushes a fleet public key to nodes that still only accept a password.
 
 ## Interfaces
-* **CLI** (`aredn-fleet`): `discover`, `plan` (dry run), `upgrade`, `radio`, `status`.
-* **Web UI**: a topology view, a node checklist with filters (model, firmware, hop count), a plan preview, and live job progress with a stop button.
+* **CLI** (`aredn-fleet`): `discover`, `plan`, `firmware`, `creds`, `upgrade`, `radio`, `gui`, `serve`.
+* **GUI**: a local FastAPI server plus a static HTML/JS front end (no build step), shown in a native window by pywebview. That's WebView2 on Windows and WebKitGTK on Linux. The same server runs headless (`aredn-fleet serve`) for a Pi or VM on the mesh.
+  * Tabs: **Nodes** (checklist, filters, only-path-to column, upgrade and radio panels), **Map** (layered by hop, RF/DTD/TUN links, click to select), **Firmware**, **Credentials**, **Activity** (job list, live log, Stop).
+  * **Auth:** the server listens on 127.0.0.1 with a random per-run token (the launcher opens `/?token=…`, which sets an HttpOnly cookie). `serve` prints a link with the token. Every `/api` call is refused without it.
+  * **Jobs** run in the background, and the UI polls for new log lines. Only one job that changes nodes may run at a time. Stop is cooperative: a rollout stops between waves and never in the middle of a flash.
+  * **Confirmation:** a real upgrade or radio change requires typing `upgrade` or `switch`. The server checks this too, not just the UI.
+  * The version picker defaults to the newest stable release, and nightlies are labelled "testing only".
+  * Passwords added in the GUI go to the OS credential store (`keyring`). Keys are referenced by path.
 * Every job is **dry run first**. It shows the wave plan and needs an explicit confirmation before it runs.
+
+## Packaging
+* **Windows** (`.github/workflows/release.yml`, on every push to main and on `v*` tags):
+  1. pytest.
+  2. PyInstaller one-folder bundle (`packaging/windows/fleet-manager.spec`).
+  3. **`--selftest`**: starts the bundled server, checks the UI, API and imports, then exits. The build fails if it fails.
+  4. **Inno Setup installer**: per-user, no admin, Start menu entry, optional desktop icon. Settings are kept on uninstall.
+  5. **Portable zip**: the same folder plus `portable.txt`. Its presence switches all storage to `data\` beside the exe.
+  6. Artifacts on every run; attached to a GitHub Release on tags.
+* **Storage locations** (`paths.py`):
+  * Windows: config in `%APPDATA%\aredn-fleet`, firmware cache in `%LOCALAPPDATA%\aredn-fleet`.
+  * Linux: XDG directories.
+  * Portable: `data\` beside the exe.
+  * The old `~/.config/aredn-fleet` from the CLI builds is migrated on first run.
+* **Linux .deb:** planned. It will be a venv under `/opt` using the system `python3-gi`, with a desktop entry plus an optional systemd service. See `packaging/linux/README.md`. A test PyInstaller build on Linux hit GTK binding mismatches, which is why the .deb uses a venv instead.
 
 ## Safety principles
 * Never act on a node the manager can't verify afterwards.
@@ -141,5 +162,8 @@ The job (`aredn-fleet radio`):
 * [x] Radio settings job (synchronized switch per RF cluster, on-node auto-revert via pushed script; simulated-cluster tests)
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)
 * [ ] Package the revert script as the optional .ipk agent
-* [ ] Web UI
+* [x] GUI (desktop window + headless serve), token auth, background jobs with stop; API tests; bundle self-test
+* [x] Windows installer + portable zip built in CI
+* [ ] First CI build verified on a real Windows machine
+* [ ] Linux .deb (desktop + headless service)
 * [ ] Field test on a lab mesh (2–3 spare nodes) before any production use

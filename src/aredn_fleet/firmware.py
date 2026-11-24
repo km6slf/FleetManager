@@ -214,10 +214,18 @@ class FirmwareStore:
             return FetchResult(dest, "failed", str(exc))
 
     def fetch_release(self, release: Release, kinds: Iterable[str] = ("sysupgrade",),
-                      workers: int = 4) -> list[FetchResult]:
+                      workers: int = 4,
+                      on_result: Callable[[FetchResult], None] | None = None) -> list[FetchResult]:
         jobs = [(p, i) for p in release.profiles.values() for i in p.images if i.type in set(kinds)]
+
+        def one(pi):
+            r = self.fetch(release, *pi)
+            if on_result:
+                on_result(r)
+            return r
+
         with ThreadPoolExecutor(workers) as pool:
-            results = list(pool.map(lambda pi: self.fetch(release, *pi), jobs))
+            results = list(pool.map(one, jobs))
         self.write_manifest(release)
         return results
 

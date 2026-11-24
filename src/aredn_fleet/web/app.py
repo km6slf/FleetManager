@@ -1,0 +1,372 @@
+"""HTTP API and static UI for the Fleet Manager GUI.
+
+Every ``/api`` call needs the session token: the desktop launcher opens
+``/?token=...``, which sets an HttpOnly cookie. In headless mode
+(``aredn-fleet serve``) the token is printed with the URL. This matters
+because the API can reflash radios: binding to a LAN address without a token
+would let anyone on that network do it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import secrets
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from .. import __version__, paths
+from ..credentials import Credential, forget_password, store_password
+from ..discovery import crawl
+from ..firmware import Catalog, FirmwareStore, match_profile, select_channels
+from ..topology import PlanError, plan_rollout
+from .state import AppState, Job, JobBusy
+
+STATIC = Path(__file__).parent / "static"
+COOKIE = "fm_token"
+
+
+# ---------------------------------------------------------------- request bodies
+
+class DiscoverReq(BaseModel):
+    start: str = "localnode"
+
+
+class CredReq(BaseModel):
+    label: str = Field(min_length=1, max_length=64)
+    kind: str  # "key" | "password"
+    key_path: str | None = None
+    password: str | None = None
+
+
+class FetchReq(BaseModel):
+    scope: str = "mesh"            # mesh | all | board
+    boards: list[str] = []
+    stable: int = 2
+    nightly: bool = True
+    include_factory: bool = False
+
+
+class PlanReq(BaseModel):
+    nodes: list[str]
+    parallel: int = 1
+    exclude_tunnels: bool = False
+
+
+class UpgradeReq(PlanReq):
+    version: str
+    soak: float = 180
+    execute: bool = False
+    confirm: str = ""
+
+
+class RadioReq(BaseModel):
+    nodes: list[str]
+    channel: int | None = None
+    width: int | None = None
+    mode: str | None = None
+    peer: str | None = None
+    revert_after: int = 600
+    execute: bool = False
+    confirm: str = ""
+
+
+# ---------------------------------------------------------------- app
+
+def create_app(state: AppState | None = None, token: str | None = None) -> FastAPI:
+    state = state or AppState()
+    token = token or secrets.token_urlsafe(24)
+    app = FastAPI(title="AREDN Fleet Manager", version=__version__, docs_url=None, redoc_url=None)
+    app.state.fm = state
+    app.state.token = token
+
+    @app.middleware("http")
+    async def auth(request: Request, call_next):
+        if request.url.path.startswith("/api/"):
+            supplied = request.cookies.get(COOKIE) or request.headers.get("x-fleet-token")
+            if not supplied or not secrets.compare_digest(supplied, token):
+                return JSONResponse({"detail": "not authorised; open the link printed at startup"},
+                                    status_code=401)
+        return await call_next(request)
+
+    @app.get("/")
+    async def index(request: Request):
+        t = request.query_params.get("token")
+        if t:
+            if not secrets.compare_digest(t, token):
+                raise HTTPException(401, "bad token")
+            resp = RedirectResponse("/", status_code=303)
+            resp.set_cookie(COOKIE, t, httponly=True, samesite="strict")
+            return resp
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
+
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    def start(kind: str, title: str, mutating: bool, body) -> dict[str, Any]:
+        try:
+            return state.jobs.start(kind, title, mutating, body).summary()
+        except JobBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    # ------------------------------------------------------------ info
+    @app.get("/api/info")
+    async def info():
+        return {"version": __version__, "portable": paths.portable_root() is not None,
+                "config_dir": str(state.config_dir), "firmware_dir": str(state.fw_dir),
+                "active_job": (j.summary() if (j := state.jobs.active_mutating()) else None)}
+
+    # ------------------------------------------------------------ discovery
+    @app.get("/api/topology")
+    async def topology():
+        return state.topology_view()
+
+    @app.post("/api/discover")
+    async def discover(req: DiscoverReq):
+        async def body(job: Job):
+            job.log(f"Crawling the mesh from {req.start}…")
+            res = await asyncio.to_thread(crawl, req.start)
+            state.set_discovery(res.topology, res.nodes, res.errors, res.start)
+            job.log(f"Found {len(res.nodes)} nodes and {len(res.topology.links)} links; "
+                    f"manager attached at {res.start}")
+            for n, e in res.errors.items():
+                job.log(f"{n}: unreachable ({e})", "warn")
+            return {"nodes": len(res.nodes), "links": len(res.topology.links)}
+        return start("discover", f"Discover from {req.start}", False, body)
+
+    # ------------------------------------------------------------ credentials
+    @app.get("/api/creds")
+    async def creds_list():
+        store = state.creds()
+        return {"credentials": [{"label": c.label, "kind": c.kind, "source": c.source}
+                                for c in store.credentials],
+                "known_good": store.known_good}
+
+    @app.post("/api/creds")
+    async def creds_add(req: CredReq):
+        store = state.creds()
+        if req.kind == "key":
+            if not req.key_path or not Path(req.key_path).expanduser().is_file():
+                raise HTTPException(400, f"key file not found: {req.key_path}")
+            cred = Credential(req.label, key_path=req.key_path)
+        elif req.kind == "password":
+            if not req.password:
+                raise HTTPException(400, "password is empty")
+            try:
+                store_password(req.label, req.password)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(500, f"OS credential store unavailable: {exc}") from exc
+            cred = Credential(req.label, keyring=True)
+        else:
+            raise HTTPException(400, "kind must be key or password")
+        store.remove(req.label)
+        store.credentials.append(cred)
+        state.save_creds(store)
+        return {"ok": True}
+
+    @app.delete("/api/creds/{label}")
+    async def creds_delete(label: str):
+        store = state.creds()
+        cred = next((c for c in store.credentials if c.label == label), None)
+        if not cred:
+            raise HTTPException(404, "no such credential")
+        if cred.keyring:
+            try:
+                forget_password(label)
+            except Exception:  # noqa: BLE001
+                pass
+        store.remove(label)
+        state.save_creds(store)
+        return {"ok": True}
+
+    # ------------------------------------------------------------ firmware
+    @app.get("/api/firmware/local")
+    async def firmware_local():
+        store = FirmwareStore(state.fw_dir)
+        out = []
+        for v in store.local_versions():
+            rel = store.load_release(v)
+            have = sum(1 for p in rel.profiles.values() for i in p.images
+                       if store.path_for(rel, p, i).exists())
+            out.append({"version": v, "channel": rel.channel, "profiles": len(rel.profiles),
+                        "images": have})
+        return {"releases": out}
+
+    @app.get("/api/firmware/channels")
+    async def firmware_channels(stable: int = 2, nightly: bool = True):
+        cat = Catalog(state.mirror)
+        try:
+            versions = await asyncio.to_thread(cat.versions)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"can't reach {state.mirror}: {exc}") from exc
+        return {"channels": [c.__dict__ for c in select_channels(versions, stable, nightly)]}
+
+    @app.post("/api/firmware/fetch")
+    async def firmware_fetch(req: FetchReq):
+        models = sorted({i.get("model", "") for i in state.nodes.values() if i.get("model")})
+        if req.scope == "mesh" and not models:
+            raise HTTPException(400, "no discovered nodes yet; run Discover or choose All hardware")
+
+        async def body(job: Job):
+            cat = Catalog(state.mirror)
+            store = FirmwareStore(state.fw_dir)
+            kinds = ["sysupgrade"] + (["factory"] if req.include_factory else [])
+            chans = select_channels(await asyncio.to_thread(cat.versions), req.stable, req.nightly)
+            for chan in chans:
+                if job.stop_requested:
+                    break
+                boards = req.boards if req.scope == "board" else None
+                job.log(f"{chan.name} {chan.version}: reading hardware list…")
+                rel = await asyncio.to_thread(cat.release, chan, None, boards)
+                if req.scope == "mesh":
+                    keep = {p.id for m in models for p in match_profile(rel, model=m)}
+                    rel.profiles = {k: v for k, v in rel.profiles.items() if k in keep}
+                    for m in models:
+                        if not match_profile(rel, model=m):
+                            job.log(f"no image matched model {m!r} in {chan.version}", "warn")
+                job.log(f"{chan.name} {rel.version}: {len(rel.profiles)} hardware profile(s)")
+                counts = {"downloaded": 0, "cached": 0, "failed": 0}
+
+                def progress(r):
+                    counts[r.status] += 1
+                    if r.status == "failed":
+                        job.log(f"FAILED {r.path.name}: {r.error}", "error")
+                    elif r.status == "downloaded":
+                        job.log(f"downloaded {r.path.name}")
+
+                await asyncio.to_thread(store.fetch_release, rel, kinds, 4, progress)
+                job.log(f"{chan.name} {rel.version}: downloaded {counts['downloaded']}, "
+                        f"cached {counts['cached']}, failed {counts['failed']}",
+                        "error" if counts["failed"] else "info")
+        return start("firmware", "Fetch firmware", False, body)
+
+    # ------------------------------------------------------------ plan / upgrade
+    def make_plan(req: PlanReq):
+        if not state.root:
+            raise HTTPException(400, "run Discover first")
+        try:
+            return plan_rollout(state.topology, state.root, req.nodes, req.parallel,
+                                ("TUN",) if req.exclude_tunnels else ())
+        except PlanError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/plan")
+    async def plan(req: PlanReq):
+        p = make_plan(req)
+        return {"root": p.root, "waves": p.waves, "warnings": p.warnings,
+                "unreachable": sorted(p.unreachable),
+                "distances": {n: p.distances.get(n) for w in p.waves for n in w}}
+
+    @app.post("/api/upgrade")
+    async def upgrade(req: UpgradeReq):
+        if req.execute and req.confirm.strip().lower() != "upgrade":
+            raise HTTPException(400, "type 'upgrade' to confirm")
+        p = make_plan(req)
+        store = FirmwareStore(state.fw_dir)
+        if req.version not in store.local_versions():
+            raise HTTPException(400, f"{req.version} isn't downloaded; fetch it on the Firmware tab")
+        release = store.load_release(req.version)
+
+        async def body(job: Job):
+            from ..jobs.upgrade import UpgradeConfig, run_rollout
+
+            creds = state.creds()
+            job.log(f"{'UPGRADE' if req.execute else 'Dry run'} to {release.version}: "
+                    + " → ".join(f"[{', '.join(w)}]" for w in p.waves))
+            for w in p.warnings:
+                job.log(w, "warn")
+
+            def on_result(r):
+                lvl = {"failed": "error", "ok": "ok", "skipped": "info"}.get(r.status, "info")
+                job.log(f"{r.node}: {r.status} {r.detail}", lvl, node=r.node, status=r.status)
+
+            rep = await run_rollout(
+                p, release, store, state.connect_factory(creds),
+                state.sysinfo, UpgradeConfig(soak_seconds=req.soak), execute=req.execute,
+                audit=state.audit_path, on_result=on_result,
+                should_stop=lambda: job.stop_requested)
+            state.save_creds(creds)
+            if rep.stopped_early:
+                job.status = "stopped" if job.stop_requested else "failed"
+                job.log(rep.reason, "error")
+            else:
+                job.log("Rollout finished" if req.execute else "Dry run finished; nothing changed", "ok")
+            return {"results": [asdict(r) for r in rep.results], "reason": rep.reason}
+
+        title = f"{'Upgrade' if req.execute else 'Dry run'} → {release.version} ({len(req.nodes)} nodes)"
+        return start("upgrade", title, req.execute, body)
+
+    # ------------------------------------------------------------ radio
+    @app.post("/api/radio")
+    async def radio(req: RadioReq):
+        from ..jobs.radio import (RadioChange, RadioConfig, cluster_warnings, rf_clusters,
+                                  run_radio_change)
+        from ..jobs.upgrade import AuditLog
+
+        if req.execute and req.confirm.strip().lower() != "switch":
+            raise HTTPException(400, "type 'switch' to confirm")
+        change = RadioChange(req.channel, req.width, req.mode, req.peer)
+        try:
+            change.validate()
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        selected = set(req.nodes)
+        clusters = [sorted(c & selected) for c in rf_clusters(state.topology, selected)]
+
+        async def body(job: Job):
+            creds = state.creds()
+            for w in cluster_warnings(state.topology, selected):
+                job.log(w, "warn")
+            log = AuditLog(state.audit_path)
+            for i, c in enumerate(clusters, 1):
+                if job.stop_requested:
+                    job.log("stopped before the next cluster", "warn")
+                    break
+                job.log(f"RF cluster {i}: {', '.join(c)}")
+                rep = await run_radio_change(
+                    c, change, state.connect_factory(creds),
+                    state.sysinfo, RadioConfig(revert_after=req.revert_after),
+                    execute=req.execute, log=log)
+                for r in rep.results.values():
+                    job.log(f"{r.node}: {r.status} {r.before} {r.detail}",
+                            "error" if r.status == "failed" else "info")
+                if rep.confirmed:
+                    job.log(f"cluster {i} confirmed on the new settings", "ok")
+                else:
+                    job.log(rep.reason, "warn" if rep.reason == "dry run" else "error")
+                    if req.execute:
+                        job.status = "failed"
+                        break
+            state.save_creds(creds)
+
+        title = f"{'Radio change' if req.execute else 'Radio dry run'} ({len(req.nodes)} nodes)"
+        return start("radio", title, req.execute, body)
+
+    # ------------------------------------------------------------ jobs
+    @app.get("/api/jobs")
+    async def jobs():
+        return {"jobs": state.jobs.list()}
+
+    @app.get("/api/jobs/{job_id}")
+    async def job(job_id: str, since: int = 0):
+        j = state.jobs.jobs.get(job_id)
+        if not j:
+            raise HTTPException(404, "no such job")
+        return {**j.summary(), "events": j.events[since:], "next": len(j.events),
+                "result": j.result if j.status != "running" else None}
+
+    @app.post("/api/jobs/{job_id}/stop")
+    async def job_stop(job_id: str):
+        j = state.jobs.jobs.get(job_id)
+        if not j:
+            raise HTTPException(404, "no such job")
+        j.stop_requested = True
+        j.log("Stop requested: finishing the current step first (a node mid-flash is never "
+              "interrupted)", "warn")
+        return j.summary()
+
+    return app

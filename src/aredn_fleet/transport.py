@@ -65,7 +65,9 @@ class SSHSession:
         await self._conn.wait_closed()
 
 
-DEFAULT_KNOWN_HOSTS = Path.home() / ".config" / "aredn-fleet" / "known_hosts"
+from . import paths
+
+DEFAULT_KNOWN_HOSTS = paths.known_hosts_file()
 
 
 class HostKeyChanged(Exception):
@@ -86,7 +88,10 @@ async def pin_host_key(host: str, known_hosts: Path) -> None:
     if known_hosts.exists() and any(line.split(" ", 1)[0] == entry
                                     for line in known_hosts.read_text().splitlines()):
         return
-    key = await asyncssh.get_server_host_key(host, AREDN_SSH_PORT)
+    import asyncio
+    key = await asyncio.wait_for(asyncssh.get_server_host_key(host, AREDN_SSH_PORT), timeout=20)
+    if key is None:
+        raise ConnectionError(f"{host}: no SSH host key offered")
     known_hosts.parent.mkdir(parents=True, exist_ok=True)
     with known_hosts.open("a") as f:
         f.write(f"{entry} {key.export_public_key('openssh').decode().strip()}\n")
@@ -99,9 +104,9 @@ def _connect_kwargs(cred: Credential, known_hosts: Path) -> dict:
         kw["client_keys"] = [os.path.expanduser(cred.key_path)]
         kw["password"] = None
     else:
-        pw = os.environ.get(cred.password_env or "", "")
+        pw = cred.password()
         if not pw:
-            raise AuthFailed(f"password env var {cred.password_env!r} is empty")
+            raise AuthFailed(f"no password available for credential {cred.label!r}")
         kw["password"] = pw
         kw["client_keys"] = None
     return kw
