@@ -111,7 +111,7 @@ The job (`aredn-fleet radio`):
 
 ## Node-specific settings
 * Any node can have its own radio settings per band: purpose, width, channel, SSID base and peer, plus a note saying why. They're stored in `config/overrides.json`, separate from discovery, so rediscovering doesn't lose them.
-* The node **stays in the group**. Whenever it's part of a radio job, its own values replace the group's field by field, and the group fills in the rest (`merge_changes`). Bands with only node settings are included too.
+* The node **stays in the group**: for firmware upgrades, and for radio bands where it has no own settings. **On a band with own settings, group radio changes don't apply to that node.** Its own values are applied, and every field left blank **keeps the node's current value**, not the group's (`merge_changes`). Own settings are (re)applied whenever the node is part of a radio job.
 * The settings are applied idempotently: a node already set that way is "unchanged", so a job with no group change can be run just to apply node settings.
 * Saving checks node settings against the node's own radios, with the same rules as a real change. Saving requires the node's radios to have been read.
 * **Expected links:** each radio's on-air signature after the change is band, link type (ad-hoc / PtMP / PtP), channel, width and full SSID. Two nodes keep an RF link only if they share a signature.
@@ -120,7 +120,8 @@ The job (`aredn-fleet radio`):
 * **GUI:**
   * a purple **custom** marker next to the node name, with a tooltip summarising its settings and note;
   * an **Own settings** column with Set… / Edit;
-  * an editor that reuses the band controls with the node's own lists, where blank means "group setting";
+  * an editor that reuses the band controls with the node's own lists, where blanks read "Keep current (…)" with the node's actual value;
+  * the group radio panel names the nodes on each band that have own settings, and says the group change won't apply to them;
   * "· own settings" on that node's line in the radio panel;
   * the confirm dialog lists every node that will use its own settings.
 

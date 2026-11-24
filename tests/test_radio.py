@@ -338,14 +338,25 @@ def test_ssid_validation():
     BandChange("5GHz", ssid="IDEC-Net_2").validate()
 
 
-def test_merge_node_settings_over_group():
-    group = [BandChange("5GHz", channel=133, width=10, ssid="IDEC")]
-    merged = merge_changes(group, {"5GHz": {"channel": 149}, "2.4GHz": {"mode": "off"}})
+def test_own_settings_replace_the_group_on_that_band_blanks_keep_current():
+    group = [BandChange("5GHz", channel=133, width=20, ssid="IDEC"), BandChange("2.4GHz", channel=6)]
+    merged = merge_changes(group, {"5GHz": {"channel": 149}})
     by = {c.band: c for c in merged}
-    assert by["5GHz"] == BandChange("5GHz", channel=149, width=10, ssid="IDEC")   # node wins on channel
-    assert by["2.4GHz"] == BandChange("2.4GHz", mode="off")                        # node-only band
+    # 5 GHz: only the node's own channel; width and SSID are NOT taken from the group
+    assert by["5GHz"] == BandChange("5GHz", channel=149)
+    # a band without own settings still follows the group
+    assert by["2.4GHz"] == BandChange("2.4GHz", channel=6)
     assert merge_changes(group, None) == group
     assert merge_changes([], {}) == []
+    assert merge_changes([], {"2.4GHz": {"mode": "off"}}) == [BandChange("2.4GHz", mode="off")]
+
+
+def test_blank_own_fields_keep_the_nodes_current_values_in_the_plan():
+    group = [BandChange("5GHz", channel=149, width=20, ssid="IDEC")]
+    merged = merge_changes(group, {"5GHz": {"channel": 133}})   # width/SSID left blank
+    p = plan_node(inv(hap_state(five_ch=131, five_bw=10)), merged)
+    assert p.sets == [(0, "channel", "133")]                     # width stays 10, SSID stays AREDN
+    assert p.final[0] == ("mesh", 133, 10, "AREDN")
 
 
 def test_link_signatures_follow_channel_and_ssid():

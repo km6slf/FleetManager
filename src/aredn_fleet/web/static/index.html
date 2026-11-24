@@ -167,7 +167,7 @@
 <dialog id="node-editor">
   <form method="dialog" onsubmit="return false">
     <h3>Own settings for <span id="ne-node"></span></h3>
-    <p class="hint">This node stays in the group. Whenever it's part of a radio change, anything set here replaces the group's value for it; the group fills in the rest. Lists come from this node's own radios.</p>
+    <p class="hint">This node stays in the group for firmware upgrades and for radio bands without own settings. On a band with own settings, group radio changes don't apply to this node: what you set here is applied, and anything left blank keeps its current value. Lists come from this node's own radios.</p>
     <div id="ne-bands"></div>
     <label>Note (why this node is different) <input id="ne-note" maxlength="200" placeholder="e.g. PtP backhaul to the EOC on its own channel"></label>
     <div class="row">

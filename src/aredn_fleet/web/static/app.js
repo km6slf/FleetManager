@@ -249,9 +249,12 @@ function bandHtml(b, ctx = { kind: "group" }) {
     ? names.slice(0, 6).map((n) => nowLine(n, b.per_node[n])).join("") + (names.length > 6 ? `<span>…and ${names.length - 6} more</span>` : "")
     : nowLine(names[0], b.per_node[names[0]]);
   const curMode = b.current_mode;
-  const blank = ctx.kind === "node" ? "Group setting" : curMode ? `Leave as is (${esc(MODE_NAMES[curMode] || curMode)})` : "Leave as is (mixed)";
+  const blank = ctx.kind === "node" ? `Keep current (${esc(MODE_NAMES[curMode] || curMode || "?")})`
+    : curMode ? `Leave as is (${esc(MODE_NAMES[curMode] || curMode)})` : "Leave as is (mixed)";
   const modeOpts = ["mesh", "meshap", "meshsta", "meshptp", "off"].map((m) => `<option value="${m}">${MODE_NAMES[m]}</option>`).join("");
   const without = ctx.kind === "group" && b.without.length ? `<p class="hint">No ${esc(b.band_label)} radio on: ${esc(b.without.join(", "))}. They're left alone.</p>` : "";
+  const ownHere = ctx.kind === "group" ? names.filter((n) => state.topo.nodes.find((x) => x.name === n)?.custom?.radio?.[b.band]) : [];
+  const ownNote = ownHere.length ? `<p class="hint"><span class="own-tag">Own ${esc(b.band_label)} settings:</span> ${esc(ownHere.join(", "))}. Changes here don't apply to ${ownHere.length > 1 ? "them" : "it"}; ${ownHere.length > 1 ? "they keep" : "it keeps"} its own values, and anything not set there stays as it is now.</p>` : "";
   const curSsid = b.current_ssid;
   return `<div class="band" data-band="${esc(b.band)}" data-kind="${ctx.kind}">
     <div class="band-head"><b>Radio ${esc(b.band_label)}</b>${ctx.kind === "group" ? `<span class="muted small">${names.length} node${names.length > 1 ? "s" : ""}</span>` : ""}</div>
@@ -261,10 +264,10 @@ function bandHtml(b, ctx = { kind: "group" }) {
       <label>Channel width <select data-k="width"></select></label>
       <label class="wide">Channel <select data-k="channel"></select></label>
       <label class="wide">Mesh SSID
-        <span class="ssid-row"><input data-k="ssid" maxlength="20" placeholder="${esc(ctx.kind === "node" ? "Group setting" : curSsid ? `Leave as is (${curSsid})` : "Leave as is")}"><span class="suffix"></span></span></label>
+        <span class="ssid-row"><input data-k="ssid" maxlength="20" placeholder="${esc(ctx.kind === "node" ? `Keep current (${curSsid || "AREDN"})` : curSsid ? `Leave as is (${curSsid})` : "Leave as is")}"><span class="suffix"></span></span></label>
       <label class="wide peer hidden">Peer MAC (Mesh PtP) <input data-k="peer" placeholder="aa:bb:cc:dd:ee:ff"></label>
     </div>
-    <p class="hint band-hint"></p>${without}</div>`;
+    <p class="hint band-hint"></p>${without}${ownNote}</div>`;
 }
 
 function mountBands(container, bands, ctx, values = {}) {
@@ -293,7 +296,7 @@ function refreshBand(el) {
   // Width: blank (leave as is / group setting) or any width every node supports.
   const wPrev = wSel.value || (el._initial?.width ? String(el._initial.width) : "");
   const curW = b.current ? b.current.width : null;
-  const wBlank = nodeCtx ? "Group setting" : curW ? `Leave as is (${curW} MHz)` : "Leave as is";
+  const wBlank = nodeCtx ? `Keep current (${curW ?? "?"} MHz)` : curW ? `Leave as is (${curW} MHz)` : "Leave as is";
   wSel.innerHTML = `<option value="">${wBlank}</option>` + b.bws.map((w) => `<option value="${w}">${w} MHz</option>`).join("");
   if ([...wSel.options].some((o) => o.value === wPrev)) wSel.value = wPrev;
   wSel.disabled = !meshy;
@@ -308,7 +311,8 @@ function refreshBand(el) {
   const curOk = cur && opts.some((c) => c.number === cur.channel);
   const keepLabel = cur ? (opts.find((c) => c.number === cur.channel)?.label || cur.channel) : null;
   const sameWidth = !wSel.value || +wSel.value === cur?.width;
-  const cBlank = nodeCtx ? "Group setting" : curOk ? `${sameWidth ? "Leave as is" : "Keep"} (${esc(keepLabel)})` : "— choose —";
+  const cBlank = nodeCtx ? (curOk ? `Keep current (${esc(keepLabel)})` : "— choose —")
+    : curOk ? `${sameWidth ? "Leave as is" : "Keep"} (${esc(keepLabel)})` : "— choose —";
   cSel.innerHTML = `<option value="">${cBlank}</option>` + opts.map((c) => `<option value="${c.number}">${esc(c.label)}</option>`).join("");
   if ([...cSel.options].some((o) => o.value === cPrev)) cSel.value = cPrev;
   cSel.disabled = !meshy || !width;

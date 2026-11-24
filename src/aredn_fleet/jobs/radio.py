@@ -228,20 +228,21 @@ class BandChange:
 
 
 def merge_changes(group: list[BandChange], custom: dict[str, dict[str, Any]] | None) -> list[BandChange]:
-    """Group settings with a node's own settings laid over them, field by field.
+    """The changes one node should get: group changes, except on bands where the node
+    has its own settings.
 
-    ``custom`` is ``{band: {mode, channel, width, ssid, peer}}``. A node's own
-    value wins wherever it sets one; the group fills in the rest. Bands with
-    node settings but no group change are included too, so a node's own
-    settings are (re)applied whenever it's part of a radio job.
+    ``custom`` is ``{band: {mode, channel, width, ssid, peer}}``. On a band with
+    own settings, the group's change for that band is ignored completely: the
+    node's own values are applied, and any field it leaves blank keeps the
+    node's *current* value (it is not switched to the group's). Bands without
+    own settings follow the group. Own settings are (re)applied whenever the
+    node is part of a radio job; if the node already matches, nothing changes.
     """
     custom = custom or {}
-    out: dict[str, BandChange] = {c.band: c for c in group}
+    out: dict[str, BandChange] = {c.band: c for c in group if c.band not in custom}
     for band, vals in custom.items():
-        base = out.get(band, BandChange(band))
-        kw = {k: vals.get(k) if vals.get(k) is not None else getattr(base, k)
-              for k in ("mode", "channel", "width", "peer", "ssid")}
-        out[band] = BandChange(band, **kw)
+        out[band] = BandChange(band, **{k: (vals.get(k) if vals.get(k) not in ("",) else None)
+                                       for k in ("mode", "channel", "width", "peer", "ssid")})
     return [c for c in out.values()
             if any(getattr(c, k) is not None for k in ("mode", "channel", "width", "ssid"))]
 
