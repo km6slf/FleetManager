@@ -137,3 +137,20 @@ th[data-sort="cuts"] { white-space: normal; width: 60px; }
 #node-editor { width: 520px; }
 #ne-bands { display: flex; flex-direction: column; gap: 12px; max-height: 60vh; overflow: auto; }
 .danger-text { color: var(--danger); }
+
+dialog.wide { width: min(980px, 94vw); }
+#cf-body { max-height: 62vh; overflow: auto; }
+.ledger { width: 100%; border-collapse: collapse; font-size: 12px; margin: 6px 0 10px; }
+.ledger th { position: static; font-size: 11px; background: var(--bg); }
+.ledger td, .ledger th { padding: 5px 6px; vertical-align: top; white-space: nowrap; }
+.ledger tr.group td { background: var(--bg); font-weight: 600; color: var(--muted); }
+.ledger .same { color: var(--muted); }
+.ledger .chg b { color: var(--ink); }
+.ledger .arrow { color: var(--muted); padding: 0 3px; }
+.ledger .st-blocked { color: var(--danger); font-weight: 600; }
+.ledger .st-skip { color: var(--muted); }
+.ledger .st-go { color: var(--ok); font-weight: 600; }
+.ledger .own { color: #8250df; font-weight: 600; }
+.ledger .why { white-space: normal; color: var(--danger); }
+.ledger .lost { white-space: normal; color: var(--warn); }
+.summary-line { font-size: 13px; margin: 4px 0; }

@@ -36,12 +36,15 @@ class Job:
     events: list[dict[str, Any]] = field(default_factory=list)
     result: Any = None
     stop_requested: bool = False
+    fingerprint: str = ""      # what a dry run reviewed; an execute must match it
+    dry_run: bool = False
 
     def log(self, msg: str, level: str = "info", **data: Any) -> None:
         self.events.append({"t": time.time(), "level": level, "msg": msg, **data})
 
     def summary(self) -> dict[str, Any]:
         return {"id": self.id, "kind": self.kind, "title": self.title, "status": self.status,
+                "dry_run": self.dry_run,
                 "mutating": self.mutating, "started": self.started, "finished": self.finished,
                 "events": len(self.events), "stop_requested": self.stop_requested}
 
@@ -58,11 +61,30 @@ class JobManager:
     def active_mutating(self) -> Job | None:
         return next((j for j in self.jobs.values() if j.mutating and j.status == "running"), None)
 
+    def reviewed(self, job_id: str | None, kind: str, fingerprint: str,
+                 max_age: float = 900) -> str | None:
+        """Why an execute may NOT proceed on the strength of dry run ``job_id`` (None = OK)."""
+        j = self.jobs.get(job_id or "")
+        if not j or j.kind != kind or not j.dry_run:
+            return "review the plan first (run the dry run from the Upgrade… / Switch… button)"
+        if j.status != "done":
+            return "the reviewed dry run didn't finish cleanly; run it again"
+        if j.fingerprint != fingerprint:
+            return ("something changed since you reviewed the plan (nodes, settings or a node's own "
+                    "settings); review it again")
+        if time.time() - (j.finished or 0) > max_age:
+            return "the review is more than 15 minutes old; review the plan again"
+        if (j.result or {}).get("blocked"):
+            return "the reviewed plan has blocked nodes; fix them first"
+        return None
+
     def start(self, kind: str, title: str, mutating: bool,
-              body: Callable[[Job], Awaitable[Any]]) -> Job:
+              body: Callable[[Job], Awaitable[Any]], fingerprint: str = "",
+              dry_run: bool = False) -> Job:
         if mutating and (busy := self.active_mutating()):
             raise JobBusy(f"'{busy.title}' is still running; wait for it to finish")
-        job = Job(uuid.uuid4().hex[:10], kind, title, mutating)
+        job = Job(uuid.uuid4().hex[:10], kind, title, mutating, fingerprint=fingerprint,
+                  dry_run=dry_run)
         self.jobs[job.id] = job
 
         async def runner():

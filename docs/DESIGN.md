@@ -162,6 +162,19 @@ The job (`aredn-fleet radio`):
   * Passwords added in the GUI go to the OS credential store (`keyring`). Keys are referenced by path.
 * Every job is **dry run first**. It shows the wave plan and needs an explicit confirmation before it runs.
 
+## Review before execute
+* **Upgrade…** and **Switch…** first run a dry run, which logs in to every selected node read-only. They then show a **review ledger** built from its results:
+  * **Upgrade:** wave by wave in execution order, one row per node with model, image, current → new firmware, and status (will upgrade / already current / BLOCKED with the reason). It also lists only-path warnings and unreachable nodes. The wave containing the node this computer connects through is labelled as going last.
+  * **Radio:** RF cluster by RF cluster, all switching at one moment. For each node and changed radio band it shows before → after for purpose, channel (node's own labels), width and the full SSID. Unchanged values are greyed out. It marks nodes using their own settings, RF links dropped on purpose ("will lose RF link to … (intended)"), and unselected neighbours that will lose links.
+* If any node is blocked, the typed confirmation and Go stay disabled.
+* **What you review is what runs.** An execute must cite a dry-run job (`reviewed_job`) of the same kind that:
+  * finished cleanly with no blocked nodes,
+  * is under 15 minutes old,
+  * has the same **fingerprint**.
+
+  For upgrades the fingerprint covers nodes, version, parallelism, soak, the tunnel option and the root node. For radio changes it covers nodes, group changes, every selected node's own settings and the revert time. Otherwise the server answers 409 ("something changed since you reviewed the plan…").
+* Execution still re-checks every node (preflight) before touching anything.
+
 ## Packaging
 * **Windows** (`.github/workflows/release.yml`, on every push to main and on `v*` tags):
   1. pytest.
@@ -200,6 +213,7 @@ The job (`aredn-fleet radio`):
 * [x] Per-band radio settings for 1- and 2-radio nodes (900 MHz, 2.4, 3.4, 5, 6 GHz), channel lists identical to the node's own dialog, multi-mesh probe
 * [x] Editable mesh SSID (group or per node) with live preview; never reset implicitly
 * [x] Node-specific settings that stay in the group, with list marker, editor, merge, and expected-link logic
+* [x] Review ledger before execute (wave order / per-radio before→after), execution bound to the reviewed dry run
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)
 * [ ] Nightly: run `tools/recon/recon-nightly.sh`, then multi-channel stations and the bulk settings job (internet bypass/sharing)
 * [ ] Package the revert script as the optional .ipk agent

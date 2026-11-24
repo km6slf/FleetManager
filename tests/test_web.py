@@ -221,3 +221,84 @@ def test_radio_job_allows_only_node_settings_but_not_nothing(client):
 def test_group_ssid_is_validated(client):
     r = client.post("/api/radio", json={"nodes": ["far1"], "changes": [{"band": "5GHz", "ssid": "no spaces allowed"}]})
     assert r.status_code == 400 and "SSID" in r.json()["detail"]
+
+
+def test_execute_requires_a_matching_recent_review():
+    from aredn_fleet.web.state import Job, JobManager
+    jm = JobManager()
+    ok = Job("r1", "radio", "dry", False, status="done", fingerprint="abc", dry_run=True,
+             finished=time.time(), result={"blocked": []})
+    jm.jobs["r1"] = ok
+    assert jm.reviewed("r1", "radio", "abc") is None
+    assert "review the plan first" in jm.reviewed(None, "radio", "abc")
+    assert "review the plan first" in jm.reviewed("r1", "upgrade", "abc")          # wrong kind
+    assert "something changed" in jm.reviewed("r1", "radio", "xyz")               # plan changed
+    ok.finished = time.time() - 3600
+    assert "15 minutes" in jm.reviewed("r1", "radio", "abc")                        # stale
+    ok.finished, ok.result = time.time(), {"blocked": ["far1"]}
+    assert "blocked" in jm.reviewed("r1", "radio", "abc")
+    jm.jobs["e1"] = Job("e1", "radio", "exec", True, status="done", fingerprint="abc", dry_run=False,
+                        finished=time.time(), result={"blocked": []})
+    assert "review the plan first" in jm.reviewed("e1", "radio", "abc")             # not a dry run
+
+
+def test_upgrade_execute_without_review_is_refused(client):
+    from aredn_fleet.firmware import FirmwareStore, Image, Profile, Release
+    img = Image("sysupgrade", "x.bin", "0" * 64, 1, "u")
+    FirmwareStore(client.state.fw_dir).write_manifest(
+        Release("stable-1", "4.26.10.0", {"p": Profile("p", "t/g", ["X"], ["x,y"], [img])}))
+    r = client.post("/api/upgrade", json={"nodes": ["far1"], "version": "4.26.10.0",
+                                          "execute": True, "confirm": "upgrade"})
+    assert r.status_code == 409 and "review the plan first" in r.json()["detail"]
+
+
+def _wait(client, job_id):
+    for _ in range(200):
+        j = client.get(f"/api/jobs/{job_id}").json()
+        if j["status"] != "running":
+            return j
+        time.sleep(0.05)
+    raise AssertionError("job still running")
+
+
+def test_radio_review_ledger_and_changed_plan_is_refused(client):
+    from aredn_fleet.transport import CommandResult
+    st = client.state
+
+    async def fake_connect(node):
+        class S:
+            async def run(self, cmd, timeout=60):
+                if cmd.startswith("ucode"):
+                    return CommandResult(0, json.dumps(_hap()), "")
+                if "radio-and-antenna" in cmd:
+                    return CommandResult(0, "single-mesh\n", "")
+                if cmd.startswith("[ -f /etc/rc.local"):
+                    return CommandResult(0, "ok\n", "")
+                if cmd.startswith("date"):
+                    return CommandResult(0, str(int(time.time())), "")
+                return CommandResult(0, "", "")
+
+            async def close(self):
+                pass
+        return S()
+
+    async def no_links(node):
+        return {"link_info": {}}
+
+    st.connector, st.sysinfo = fake_connect, no_links
+    body = {"nodes": ["far1", "far2"], "changes": [{"band": "5GHz", "channel": 149, "ssid": "IDEC"}]}
+    job = client.post("/api/radio", json=body).json()
+    j = _wait(client, job["id"])
+    assert j["status"] == "done" and j["dry_run"]
+    rows = {n["node"]: n for c in j["result"]["clusters"] for n in c["nodes"]}
+    led = rows["far1"]["ledger"][0]
+    assert led["band_label"] == "5 GHz" and led["changed"]
+    assert led["before"]["channel"] == "131 (5655)" and led["after"]["channel"] == "149 (5745)"
+    assert led["before"]["ssid"] == "AREDN-10-v3" and led["after"]["ssid"] == "IDEC-10-v3"
+    assert led["before"]["width"] == led["after"]["width"] == "10 MHz"
+    # the reviewed plan is what may run: changing a node's own settings afterwards invalidates it
+    st.set_radios("far1", __import__("aredn_fleet.jobs.radio", fromlist=["x"]).parse_radio_inventory(
+        json.dumps(_hap()), "single-mesh"))
+    client.put("/api/overrides/far1", json={"radio": {"5GHz": {"channel": 133}}})
+    r = client.post("/api/radio", json={**body, "execute": True, "confirm": "switch", "reviewed_job": job["id"]})
+    assert r.status_code == 409 and "something changed" in r.json()["detail"]

@@ -177,15 +177,21 @@ $("#btn-up-dry").addEventListener("click", () => guarded(async () => {
   const job = await api("/api/upgrade", { body: upgradeBody(false) });
   followJob(job.id);
 }));
-$("#btn-up-go").addEventListener("click", () => guarded(async () => {
+$("#btn-up-go").addEventListener("click", (e) => guarded(async () => {
   const b = upgradeBody(false);
   if (!b.version) throw new Error("Download firmware first (Firmware tab)");
-  const p = await api("/api/plan", { body: { nodes: b.nodes, parallel: b.parallel, exclude_tunnels: b.exclude_tunnels } });
-  const ok = await confirmDialog(`Upgrade ${b.nodes.length} node(s) to ${b.version}`,
-    `${planHtml(p)}<p class="hint">Each wave is verified before the next starts. The run stops at the first failure and never continues toward this computer past it.</p>`, "upgrade");
+  const btn = e.currentTarget;
+  busy(btn, true);
+  let review;
+  try { review = await runAndWait("/api/upgrade", b, "Checking every selected node…"); } finally { busy(btn, false); }
+  const r = review.result;
+  const go = r.results.filter((x) => x.status === "would-upgrade").length;
+  if (!go && !r.blocked.length) { toast("Nothing to upgrade: every selected node is already on " + r.version); return; }
+  const ok = await confirmDialog(`Review: upgrade to ${r.version}`, upgradeLedger(r), "upgrade",
+    { wide: true, blocked: r.blocked.length > 0 });
   if (!ok) return;
-  const job = await api("/api/upgrade", { body: upgradeBody(true, "upgrade") });
-  followJob(job.id);
+  const job = await api("/api/upgrade", { body: { ...b, execute: true, confirm: "upgrade", reviewed_job: review.id } });
+  followJob(job.id, { onDone: () => loadTopology() });
 }));
 
 // ------------------------------------------------------------------ radio
@@ -400,30 +406,105 @@ $("#btn-read-radios").addEventListener("click", () => guarded(async () => {
 $("#btn-ra-dry").addEventListener("click", () => guarded(async () => {
   followJob((await api("/api/radio", { body: radioBody(false) })).id, { onDone: () => loadTopology() });
 }));
-$("#btn-ra-go").addEventListener("click", () => guarded(async () => {
+$("#btn-ra-go").addEventListener("click", (e) => guarded(async () => {
   const b = radioBody(false);
-  const what = b.changes.map((c) => {
-    const band = radioOpts.bands.find((x) => x.band === c.band).band_label;
-    const bits = [c.mode && MODE_NAMES[c.mode], c.channel !== null && `channel ${c.channel}`, c.width && `${c.width} MHz`, c.ssid && `SSID ${c.ssid}`].filter(Boolean);
-    return `<li>Radio ${esc(band)}: ${esc(bits.join(", "))}</li>`;
-  }).join("") + b.nodes.map((n) => state.topo.nodes.find((x) => x.name === n)).filter((n) => n?.custom)
-    .map((n) => `<li><b>${esc(n.name)}</b> uses its own settings: ${esc(n.custom.text)}</li>`).join("");
-  const ok = await confirmDialog(`Change radios on ${b.nodes.length} node(s)`,
-    `<ol>${what}</ol><p>Nodes in each RF cluster switch at the same moment and reboot if AREDN needs it. Each node puts its old settings back after ${b.revert_after}s unless every node in its cluster is seen on the new settings with its RF neighbours.</p><p class="hint">Run the dry run first: it re-reads every radio and checks each choice against that node.</p>`, "switch");
+  const btn = e.currentTarget;
+  busy(btn, true);
+  let review;
+  try { review = await runAndWait("/api/radio", b, "Reading every selected node's radios…"); } finally { busy(btn, false); }
+  const r = review.result;
+  const changing = r.clusters.flatMap((c) => c.nodes).filter((n) => n.status === "would-change").length;
+  if (!changing && !r.blocked.length) { toast("Nothing to change: the selected nodes are already set that way"); return; }
+  const ok = await confirmDialog("Review: radio changes", radioLedger(r), "switch",
+    { wide: true, blocked: r.blocked.length > 0 });
   if (!ok) return;
-  followJob((await api("/api/radio", { body: radioBody(true, "switch") })).id, { onDone: () => loadTopology() });
+  const job = await api("/api/radio", { body: { ...b, execute: true, confirm: "switch", reviewed_job: review.id } });
+  followJob(job.id, { onDone: () => loadTopology() });
 }));
 
+// ------------------------------------------------------------------ review (dry run -> ledger)
+async function runAndWait(path, body, label) {
+  const job = await api(path, { body });
+  toast(label);
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const j = await api(`/api/jobs/${job.id}`);
+    if (j.status !== "running") {
+      loadJobs();
+      if (j.status !== "done" || !j.result) throw new Error(`The check didn't finish (${j.status}); see Activity`);
+      return { id: job.id, result: j.result };
+    }
+  }
+}
+
+function busy(btn, on) { btn.disabled = on; btn.dataset.label ||= btn.textContent; btn.textContent = on ? "Checking…" : btn.dataset.label; }
+
+function upgradeLedger(r) {
+  const order = { "would-upgrade": 0, skipped: 1, failed: 2 };
+  const byWave = {};
+  r.results.forEach((x) => (byWave[x.wave ?? "–"] ||= []).push(x));
+  const go = r.results.filter((x) => x.status === "would-upgrade").length;
+  const rows = Object.keys(byWave).sort((a, b) => a - b).map((w) =>
+    `<tr class="group"><td colspan="6">Wave ${esc(w)}${byWave[w].some((x) => x.node === state.topo.root) ? " (the node this computer connects through goes last)" : ""}</td></tr>` +
+    byWave[w].sort((a, b) => (order[a.status] ?? 3) - (order[b.status] ?? 3)).map((x) => {
+      const st = x.status === "would-upgrade" ? '<span class="st-go">will upgrade</span>'
+        : x.status === "skipped" ? '<span class="st-skip">already current</span>'
+        : '<span class="st-blocked">BLOCKED</span>';
+      return `<tr><td><b>${esc(x.node)}</b></td><td>${esc(x.model)}</td><td>${esc(x.profile || "")}</td>
+        <td class="${x.from_version === x.to_version ? "same" : "chg"}">${esc(x.from_version || "?")}<span class="arrow">→</span><b>${esc(x.to_version)}</b></td>
+        <td>${st}</td><td class="why">${x.status === "failed" ? esc(x.detail) : ""}</td></tr>`;
+    }).join("")).join("");
+  const warns = [...(r.warnings || []), ...(r.unreachable?.length ? ["Skipped, unreachable: " + r.unreachable.join(", ")] : [])]
+    .map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("");
+  return `<p class="summary-line"><b>${go}</b> node(s) will be upgraded to <b>${esc(r.version)}</b> (${esc(r.channel)}), outermost first, one wave at a time. Each wave is checked before the next starts, and the run stops at the first failure.</p>
+    <table class="ledger"><thead><tr><th>Node</th><th>Model</th><th>Image</th><th>Firmware</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>${warns}
+    ${r.blocked.length ? `<p class="st-blocked">Blocked: ${esc(r.blocked.join(", "))}. Fix these (or deselect them) and review again.</p>` : ""}`;
+}
+
+function cell(before, after) {
+  if (before === after) return `<td class="same">${esc(after ?? "–")}</td>`;
+  return `<td class="chg">${esc(before ?? "–")}<span class="arrow">→</span><b>${esc(after ?? "–")}</b></td>`;
+}
+
+function radioLedger(r) {
+  let changing = 0;
+  const body = r.clusters.map((c) => {
+    const rows = c.nodes.map((n) => {
+      const own = n.own ? ' <span class="own">own settings</span>' : "";
+      if (n.status === "failed") {
+        return `<tr><td><b>${esc(n.node)}</b>${own}</td><td colspan="5"></td><td class="st-blocked">BLOCKED</td><td class="why">${esc(n.detail)}</td></tr>`;
+      }
+      if (!n.ledger.length || n.status === "unchanged") {
+        return `<tr><td><b>${esc(n.node)}</b>${own}</td><td colspan="5" class="same">${esc(n.detail || "no change")}</td><td class="st-skip">unchanged</td><td></td></tr>`;
+      }
+      changing += 1;
+      return n.ledger.map((l, i) => `<tr>
+        <td>${i === 0 ? `<b>${esc(n.node)}</b>${own}` : ""}</td><td>${esc(l.band_label)}</td>
+        ${cell(l.before.mode, l.after.mode)}${cell(l.before.channel, l.after.channel)}${cell(l.before.width, l.after.width)}${cell(l.before.ssid, l.after.ssid)}
+        <td>${i === 0 ? '<span class="st-go">will change</span>' : ""}</td>
+        <td class="lost">${i === 0 && n.lost_links.length ? "will lose RF link to " + esc(n.lost_links.join(", ")) + " (intended)" : ""}</td></tr>`).join("");
+    }).join("");
+    return `<tr class="group"><td colspan="8">RF cluster ${c.index}: these nodes switch at the same moment</td></tr>${rows}`;
+  }).join("");
+  const warns = (r.warnings || []).map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("");
+  return `<p class="summary-line"><b>${changing}</b> node(s) will change. Nodes reboot if AREDN needs it, and each puts its old settings back unless every node in its cluster is seen on the new settings with the RF links it should have.</p>
+    <table class="ledger"><thead><tr><th>Node</th><th>Radio</th><th>Purpose</th><th>Channel</th><th>Width</th><th>SSID</th><th>Status</th><th></th></tr></thead><tbody>${body}</tbody></table>${warns}
+    ${r.blocked.length ? `<p class="st-blocked">Blocked: ${esc(r.blocked.join(", "))}. Fix these (or deselect them) and review again.</p>` : ""}`;
+}
+
 // ------------------------------------------------------------------ confirm dialog
-function confirmDialog(title, html, word) {
+function confirmDialog(title, html, word, { wide = false, blocked = false } = {}) {
   const d = $("#confirm");
+  d.classList.toggle("wide", wide);
   $("#cf-title").textContent = title;
   $("#cf-body").innerHTML = html;
   $("#cf-word").textContent = word;
   const input = $("#cf-input"), ok = $("#cf-ok");
   input.value = "";
   ok.disabled = true;
-  input.oninput = () => (ok.disabled = input.value.trim().toLowerCase() !== word);
+  input.disabled = blocked;
+  input.placeholder = blocked ? "Fix the blocked nodes first" : "";
+  input.oninput = () => (ok.disabled = blocked || input.value.trim().toLowerCase() !== word);
   return new Promise((resolve) => {
     d.onclose = () => resolve(d.returnValue === "ok" && !ok.disabled);
     d.showModal();

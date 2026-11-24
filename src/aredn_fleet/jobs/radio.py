@@ -521,6 +521,8 @@ class RadioNodeResult:
     status: str = "pending"   # would-change, unchanged, armed, verified, confirmed, failed
     detail: str = ""
     before: str = ""
+    ledger: list[dict[str, Any]] = field(default_factory=list)   # per radio: before -> after
+    lost_links: list[str] = field(default_factory=list)          # RF links dropped on purpose
 
 
 @dataclass
@@ -528,6 +530,26 @@ class RadioReport:
     results: dict[str, RadioNodeResult]
     confirmed: bool
     reason: str = ""
+
+
+def _radio_view(r: RadioInfo, mode: str, ch: int | None, bw: int | None, ssid: str | None) -> dict:
+    mesh = mode in MESH_MODES
+    return {"mode": MODE_LABELS.get(mode, mode),
+            "channel": r.label(ch, bw) if mesh else None,
+            "width": f"{bw} MHz" if mesh and bw else None,
+            "ssid": full_ssid(ssid or DEFAULT_SSID, mode, ch, bw, r.band) if mesh else None}
+
+
+def ledger_for(inv: NodeRadios, plan: NodePlan) -> list[dict[str, Any]]:
+    """Per radio the plan touches: what it is now and what it will be, for review screens."""
+    rows = []
+    for idx, (mode, ch, bw, ssid) in sorted(plan.final.items()):
+        r = next(x for x in inv.radios if x.index == idx)
+        before = _radio_view(r, r.mode, r.channel, r.bandwidth, r.ssid)
+        after = _radio_view(r, mode, ch, bw, ssid)
+        rows.append({"band": r.band, "band_label": band_label(r.band), "before": before,
+                     "after": after, "changed": before != after})
+    return rows
 
 
 def describe(inv: NodeRadios) -> str:
@@ -603,6 +625,7 @@ async def run_radio_change(cluster: list[str],
                                             "timer couldn't survive a reboot")
             continue
         plans[n] = plan
+        r.ledger = ledger_for(inv, plan)
         r.status = "would-change"
         r.detail = ", ".join(f"radio{i}_{k}={v}" for i, k, v in plan.sets)
         if plan.notes:
@@ -624,6 +647,7 @@ async def run_radio_change(cluster: list[str],
         keep = {m for m in neighbours_before[n] if m in sigs and sigs[n] & sigs[m]}
         expected[n] = keep
         dropped = neighbours_before[n] - keep
+        results[n].lost_links = sorted(dropped)
         if dropped:
             results[n].detail += f"; WILL LOSE RF LINK TO {', '.join(sorted(dropped))} (different settings)"
 

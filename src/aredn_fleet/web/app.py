@@ -10,6 +10,8 @@ would let anyone on that network do it.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import secrets
 from dataclasses import asdict
 from pathlib import Path
@@ -63,6 +65,7 @@ class UpgradeReq(PlanReq):
     soak: float = 180
     execute: bool = False
     confirm: str = ""
+    reviewed_job: str | None = None
 
 
 class BandChangeReq(BaseModel):
@@ -80,6 +83,7 @@ class RadioReq(BaseModel):
     revert_after: int = 600
     execute: bool = False
     confirm: str = ""
+    reviewed_job: str | None = None
 
 
 class NodesReq(BaseModel):
@@ -122,9 +126,13 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
-    def start(kind: str, title: str, mutating: bool, body) -> dict[str, Any]:
+    def fingerprint(obj: Any) -> str:
+        return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()
+
+    def start(kind: str, title: str, mutating: bool, body, fp: str = "",
+              dry_run: bool = False) -> dict[str, Any]:
         try:
-            return state.jobs.start(kind, title, mutating, body).summary()
+            return state.jobs.start(kind, title, mutating, body, fp, dry_run).summary()
         except JobBusy as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -280,6 +288,10 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
     async def upgrade(req: UpgradeReq):
         if req.execute and req.confirm.strip().lower() != "upgrade":
             raise HTTPException(400, "type 'upgrade' to confirm")
+        fp = fingerprint({"nodes": sorted(req.nodes), "version": req.version, "parallel": req.parallel,
+                          "soak": req.soak, "tunnels": req.exclude_tunnels, "root": state.root})
+        if req.execute and (why := state.jobs.reviewed(req.reviewed_job, "upgrade", fp)):
+            raise HTTPException(409, why)
         p = make_plan(req)
         store = FirmwareStore(state.fw_dir)
         if req.version not in store.local_versions():
@@ -310,10 +322,16 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                 job.log(rep.reason, "error")
             else:
                 job.log("Rollout finished" if req.execute else "Dry run finished; nothing changed", "ok")
-            return {"results": [asdict(r) for r in rep.results], "reason": rep.reason}
+            wave_of = {n: i + 1 for i, w in enumerate(p.waves) for n in w}
+            models = {n: (state.nodes.get(n) or {}).get("model", "") for n in wave_of}
+            rows = [{**asdict(r), "wave": wave_of.get(r.node), "model": models.get(r.node, "")}
+                    for r in rep.results]
+            return {"version": release.version, "channel": release.channel, "waves": p.waves,
+                    "warnings": p.warnings, "unreachable": sorted(p.unreachable), "results": rows,
+                    "reason": rep.reason, "blocked": [r["node"] for r in rows if r["status"] == "failed"]}
 
         title = f"{'Upgrade' if req.execute else 'Dry run'} → {release.version} ({len(req.nodes)} nodes)"
-        return start("upgrade", title, req.execute, body)
+        return start("upgrade", title, req.execute, body, fp, dry_run=not req.execute)
 
     # ------------------------------------------------------------ radio
     @app.post("/api/radios/read")
@@ -378,10 +396,16 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             raise HTTPException(400, str(exc)) from exc
         selected = set(req.nodes)
         clusters = [sorted(c & selected) for c in rf_clusters(state.topology, selected)]
+        fp = fingerprint({"nodes": sorted(req.nodes), "changes": [c.model_dump() for c in req.changes],
+                          "own": {n: (state.overrides.get(n) or {}).get("radio") for n in sorted(req.nodes)},
+                          "revert_after": req.revert_after})
+        if req.execute and (why := state.jobs.reviewed(req.reviewed_job, "radio", fp)):
+            raise HTTPException(409, why)
 
         async def body(job: Job):
             creds = state.creds()
-            for w in cluster_warnings(state.topology, selected):
+            out = {"clusters": [], "warnings": cluster_warnings(state.topology, selected), "blocked": []}
+            for w in out["warnings"]:
                 job.log(w, "warn")
             for n in sorted(selected):
                 if state.overrides.get(n):
@@ -395,6 +419,10 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                 job.log(f"RF cluster {i}: {', '.join(c)}")
                 if not any(per_node[n] for n in c):
                     job.log(f"RF cluster {i}: nothing to change")
+                    out["clusters"].append({"index": i, "nodes": [
+                        {"node": n, "status": "unchanged", "detail": "no settings to apply", "ledger": [],
+                         "lost_links": [], "own": bool(state.overrides.get(n))} for n in c],
+                        "reason": "nothing to change"})
                     continue
                 rep = await run_radio_change(
                     c, {n: per_node[n] for n in c}, state.connect_factory(creds), state.sysinfo,
@@ -403,6 +431,10 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                 for r in rep.results.values():
                     lvl = {"failed": "error", "confirmed": "ok", "unchanged": "info"}.get(r.status, "info")
                     job.log(f"{r.node}: {r.status} — {r.detail or r.before}", lvl)
+                out["clusters"].append({"index": i, "reason": rep.reason, "confirmed": rep.confirmed,
+                                        "nodes": [{**asdict(r), "own": bool(state.overrides.get(r.node))}
+                                                  for r in rep.results.values()]})
+                out["blocked"] += [r.node for r in rep.results.values() if r.status == "failed"]
                 if rep.confirmed:
                     job.log(f"cluster {i} confirmed on the new settings", "ok")
                 elif rep.reason in ("dry run", "nothing to change on these nodes"):
@@ -413,9 +445,10 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                         job.status = "failed"
                         break
             state.save_creds(creds)
+            return out
 
         title = f"{'Radio change' if req.execute else 'Radio dry run'} ({len(req.nodes)} nodes)"
-        return start("radio", title, req.execute, body)
+        return start("radio", title, req.execute, body, fp, dry_run=not req.execute)
 
     # ------------------------------------------------------------ node-specific settings
     @app.get("/api/overrides")
