@@ -1,22 +1,40 @@
-# Looking ahead: AREDN release-candidate features
+# Looking ahead: AREDN release candidate (RC)
 
-Source: the release-candidate slides from Pacificon 2026. The full release notes are a private Google Doc, and access has been requested. The bench node gets these features by upgrading to the latest nightly. Then `tools/recon/recon-nightly.sh` (read-only, and it removes secrets on the node) shows the real setting names.
+Source: the AREDN team's "Release Candidate – Major changes and tests" document (Nov 2026). The RC process started with nightly 20261012-e3528941. Later nightlies replace the RC as fixes land; the document names 20261027-e39b7e04 as current. The stable build that comes out of it becomes 4.26.X.0. `tools/recon/recon-nightly.sh` (read-only, removes secrets on the node) confirms the real setting names once the bench node is on the RC.
 
-| RC feature | What it means for Fleet Manager | Plan |
+## What the RC changes for **upgrading** (affects Fleet Manager first)
+
+| RC note | Why it matters | Fleet Manager change |
 |---|---|---|
-| **Multi-radio mesh.** All radios can mesh at once, e.g. 2.4 + 5 GHz bridging a regional mesh to a local one | Today the node's own UI turns the other radio off when you pick a second mesh radio. Fleet Manager refuses that combination unless the node supports it. | **Done:** per-band radio settings. Each node is probed for the restriction in its own UI code (`multi_mesh`). Still to do: confirm the probe on the nightly. |
-| **Multi-channel Mesh Stations.** A station is given several channels and picks the best PtMP to connect to (SSID becomes `AREDN-X-<bw>-v3`) | The channel becomes a *list*, for Mesh Station mode only | Find the setting format on the nightly (`radioN_channel` as a list, or a new key). Then show a multi-select in Mesh Station mode when every selected node supports it, and check after the switch that the node joined one of the listed channels. |
-| **Internet bypass.** A node can opt out of carrying internet-bound traffic | A per-node routing setting. It doesn't touch RF, so there's no cluster switch | Add a **bulk settings** job with the same backup, revert and confirm machinery (no shared switch time). Find the key on the nightly. |
-| **A dead internet connection is no longer advertised** | Automatic behaviour | Show each node's gateway state in the Nodes table if sysinfo exposes it. |
-| **Internet attached to one node can be shared with local nodes** | Per-node setting | Same bulk settings job. |
-| **The LAN network address can be changed** | Changes the node's IP addressing. If it's the node this computer reaches the mesh through, the manager loses its connection. | Never bulk. Per node at most, with an explicit warning, and never on the root node. |
-| **Tunnels no longer use IP addresses** | Link types reported by sysinfo may change | Check `linkType` values on the nightly so tunnels are still recognised (the "Don't count on tunnel links" option depends on it). |
-| **Babel rerouting is more responsive** | Routes recover faster after a reboot | Measure on the bench, then shorten the default soak time and neighbour timeouts. |
-| **64 MB devices have about 8 MB more free memory** | More headroom for the firmware image in `/tmp` | Re-measure; the RAM preflight check stays. |
-| **Mesh page tool shortcuts** | None | None |
+| **Back up your configuration before upgrading to an RC build** | Recovery, and the developers may ask for it | Save each node's config backup to this computer before flashing (`config/backups/<node>/<time>-<from-version>.tgz`). |
+| **Mesh Station → PtMP: the PtMP end must be on 4.26.7.0 or (better) the RC before the station is upgraded** | This reverses edge-first for PtMP: the AP (inner) must go *before* its stations (outer) | Planner: "AP before its stations" ordering when both are selected (stations just drop off briefly while the AP reboots). Block a station whose AP is older than 4.26.7.0 and not being upgraded in the same run. Needs radio inventory to know which nodes are AP and which are station. |
+| **AC radios lose channels 48, 52, 56 and 64**; wider channels overlapping them are gone too (e.g. 60 @ 40 MHz) | A node on one of these channels would come up on a channel that no longer exists | Pre-upgrade check for RC targets: flag any 5 GHz radio whose channel and width overlap 48/52/56/64, and block it until it's moved. |
+| **IPQ40xx reboot freeze (in 4.26.7.0)**: a few MikroTik IPQ40xx units (e.g. some hAP ac3) never finish a reboot; the RC fixes it, but the reboot *into* the RC still needs one power cycle | The node won't come back by itself after flashing, so the rollout times out and stops | Review screen warns for `ipq40xx` hardware upgrading *from* 4.26.7.0 ("may need a power cycle; have someone on site"). If such a node doesn't return, the failure message says so. |
+| Channel lists reworked: no regulatory filtering (the hardware decides), 40/80/160 MHz back, 3 GHz list fixed | Saved radio details go stale after an upgrade | Re-read radios automatically after a node upgrades, and mark radio details stale when a node's firmware differs from when they were read. |
+| Tunnels lose their 172.x addresses; new tunnels can't be made between RC and older nodes; non-upgraded nodes may show RC tunnels white or twice | Mixed-version meshes look odd in sysinfo | Discovery already de-duplicates links. Tunnel links are never part of upgrade verification. Don't treat white/duplicate tunnels as failures. |
+| XLinks lose their IP address (VLAN only) | Anything that pinged old XLink IPs breaks | Note only. |
+| Babel resyncs after tunnel/XLink changes; Babel route readiness is more responsive | Neighbours may take a moment to reappear | Keep the 5-minute neighbour timeout for now, then measure on the bench. |
+| Memory: sysinfo now shows Available RAM (not Free); 64 MB devices gain about 6–8 MB | More headroom for the image in `/tmp` | The RAM preflight already uses `MemAvailable`. |
 
-## Also to check on the nightly
-- Whether a wireless change still forces a reboot. On 4.26.1.0, `node-setup`'s `wireless` case falls through to `default`. If the nightly fixes this, radio changes become a quick service restart instead of a reboot. The revert script already handles both.
-- Whether `aredn_sysupgrade` changed.
-- The new `/a/sysinfo` fields, such as per-radio info. If sysinfo reports every radio, the Nodes table can show radios without logging in.
-- Whether 6 GHz on the OpenWrt One appears as a separate radio. Fleet Manager infers 6 GHz from frequencies at or above 5925 MHz if the node doesn't name the band.
+## New features and what Fleet Manager can do with them
+
+| RC feature | Plan |
+|---|---|
+| **Multiple radios can each be Mesh, Mesh Station, Mesh PtP, Mesh PtMP or LAN hotspot** (still only one WAN client) | Done: per-band settings and the per-node multi-mesh probe. Confirm the probe on the RC, and keep refusing a second WAN client. |
+| **Mesh Stations can have several channels**; the UI shows "Searching" until one is chosen | Find the setting format with the recon script. Then offer a multi-select in Mesh Station mode, and after a switch accept any listed channel (and tolerate "Searching" for a while). |
+| **WAN shared to DtD neighbours ("DtD to WAN"), on by default** | Bulk settings job: show it in the Nodes table and let admins turn it off fleet-wide. |
+| **A node can exclude itself from routing internet-bound traffic** | Bulk settings job toggle. |
+| **WAN Monitor** withdraws WAN access the node advertises when its WAN is down | Show gateway status in the Nodes table if sysinfo exposes it. |
+| **WAN MTU can be changed** | Per node only ("test with care", per the RC notes). |
+| **Firewall/NAT can be disabled**; **Babel can run on the LAN**; **turning off LAN DHCP stops LAN route advertisement** | Per node only, with warnings. Not bulk. |
+| **LAN network address can be changed** (masked by LAN type) | Per node only, never on the node this computer connects through. |
+| **Ethernet port configuration stored differently** (migrates on upgrade) | A reason for the pre-upgrade backup. No direct change. |
+| **Traceroute through RC nodes shows node names** | Use traceroute for path checks later. |
+| **Wifi Signal/Scan work on all radios and in PtP/PtMP** | Possible later: signal check after radio changes. |
+| AREDNLink v0.0.1 retired | Nothing to do. |
+
+## To confirm on the bench (RC)
+- Whether a wireless change still needs a reboot. On 4.26.1.0, `node-setup`'s `wireless` case falls through to `default`. The revert script handles both cases.
+- Whether `aredn_sysupgrade` changed, and the new `/a/sysinfo` fields (per-radio info? WAN monitor state?).
+- Setting names for: multi-channel stations, DtD to WAN, internet exclusion, WAN monitor.
+- How 6 GHz shows on the OpenWrt One. Fleet Manager infers 6 GHz from frequencies at or above 5925 MHz if the node doesn't name the band.
