@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ..topology import Topology
+from ..discovery import link_entries
 from ..transport import NodeSession, detached
 
 MESH_MODES = {"mesh", "meshap", "meshptp", "meshsta"}
@@ -589,7 +590,7 @@ def expectation_met(exp: dict[str, Any], iw_out: str) -> bool:
 
 def rf_neighbours(si: dict[str, Any] | None) -> set[str]:
     out = set()
-    for e in ((si or {}).get("link_info") or {}).values():
+    for e in link_entries(si or {}):
         if e.get("hostname") and str(e.get("linkType", "")).upper() == "RF":
             out.add(e["hostname"].lower().removesuffix(".local.mesh"))
     return out

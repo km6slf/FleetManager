@@ -44,8 +44,9 @@ Fetcher = Callable[[str], dict[str, Any]]
 
 
 SYSINFO_PATHS = (
-    "/a/sysinfo?link_info=1",              # AREDN 4.x UI (cgi path 307-redirects here)
-    "/cgi-bin/sysinfo.json?link_info=1",   # older firmware
+    ":80/a/sysinfo?link_info=1",              # AREDN 4.x UI (cgi path 307-redirects here)
+    ":80/cgi-bin/sysinfo.json?link_info=1",   # older firmware (api_version 1.x, Lua UI)
+    ":8080/cgi-bin/sysinfo.json?link_info=1", # oldest firmware served its pages on 8080 only
 )
 
 
@@ -56,9 +57,23 @@ def http_fetch(node: str, timeout: float = 8.0) -> dict[str, Any]:
         try:
             with urllib.request.urlopen(f"http://{host}{path}", timeout=timeout) as resp:  # noqa: S310
                 return json.load(resp)
-        except urllib.error.HTTPError as exc:  # 404 on firmware without the new path
+        except urllib.error.HTTPError as exc:  # 404 on firmware without this path
             last = exc
+        except urllib.error.URLError as exc:  # port 8080 closed on newer firmware
+            last = exc
+            if path.startswith(":80/"):
+                raise
     raise last or OSError("no sysinfo")
+
+
+def link_entries(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """``link_info`` is a map keyed by neighbour IP; old firmware sends ``[]`` when empty."""
+    li = data.get("link_info") or {}
+    if isinstance(li, dict):
+        return [e for e in li.values() if isinstance(e, dict)]
+    if isinstance(li, list):
+        return [e for e in li if isinstance(e, dict)]
+    return []
 
 
 def parse_node(data: dict[str, Any]) -> tuple[NodeInfo, list[tuple[str, str]]]:
@@ -74,10 +89,10 @@ def parse_node(data: dict[str, Any]) -> tuple[NodeInfo, list[tuple[str, str]]]:
         raw=data,
     )
     neighbours: list[tuple[str, str]] = []
-    for entry in (data.get("link_info") or {}).values():
+    for entry in link_entries(data):
         host = entry.get("hostname")
         if host:
-            neighbours.append((normalize(host), str(entry.get("linkType", "RF")).upper()))
+            neighbours.append((normalize(host), str(entry.get("linkType") or "RF").upper()))
     return info, neighbours
 
 

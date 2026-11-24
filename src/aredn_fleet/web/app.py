@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from .. import __version__, paths
 from ..credentials import Credential, forget_password, store_password
 from ..discovery import crawl
-from ..firmware import Catalog, FirmwareStore, match_profile, select_channels
+from ..firmware import Catalog, Channel, FirmwareStore, ReleaseIndex, match_profile, select_channels
 from ..topology import PlanError, plan_rollout
 from .state import AppState, Job, JobBusy, radio_options
 
@@ -53,6 +53,7 @@ class FetchReq(BaseModel):
     stable: int = 2
     nightly: bool = True
     include_factory: bool = False
+    version: str | None = None     # one specific release (e.g. 3.25.5.1), instead of the channels
 
 
 class PlanReq(BaseModel):
@@ -252,7 +253,13 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             cat = Catalog(state.mirror)
             store = FirmwareStore(state.fw_dir)
             kinds = ["sysupgrade"] + (["factory"] if req.include_factory else [])
-            chans = select_channels(await asyncio.to_thread(cat.versions), req.stable, req.nightly)
+            versions = await asyncio.to_thread(cat.versions)
+            if req.version:
+                if req.version not in versions:
+                    raise ValueError(f"{req.version} isn't in AREDN's firmware catalog")
+                chans = [Channel("release", req.version, versions[req.version])]
+            else:
+                chans = select_channels(versions, req.stable, req.nightly)
             for chan in chans:
                 if job.stop_requested:
                     break
@@ -350,15 +357,24 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
             cfg = UpgradeConfig(soak_seconds=req.soak, backup_dir=backup_dir, rc_checks=rc)
             from ..rc import ptmp_pairs
+            from ..routing import LABELS, migration_blocks, routing_of
             aps: dict[str, set[str]] = {}
             for ap, sta in ptmp_pairs(state.topology.links, state.radios):
                 aps.setdefault(sta, set()).add(ap)
+            # OLSR -> Babel: judged on the whole mesh (each node's protocol from its firmware).
+            protocols = {n: routing_of((state.nodes.get(n) or {}).get("firmware", ""))
+                         for n in state.topology.nodes}
+            blocked = migration_blocks(state.topology, state.root or "", req.nodes, release.version,
+                                       protocols, ("TUN",) if req.exclude_tunnels else ())
+            for n, why in sorted(blocked.items()):
+                job.log(f"{n}: {why}", "warn")
+            index = ReleaseIndex(Catalog(state.mirror), state.fw_dir / "catalog")
             rep = await run_rollout(
                 p, release, store, state.connect_factory(creds),
                 state.sysinfo, cfg, execute=req.execute,
                 audit=state.audit_path, on_result=on_result,
                 should_stop=lambda: job.stop_requested, on_inventory=state.set_radios,
-                access_points=aps)
+                access_points=aps, blocked=blocked, final_release=index.final_release)
             state.save_creds(creds)
             if rep.stopped_early:
                 job.status = "stopped" if job.stop_requested else "failed"
@@ -367,12 +383,14 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                 job.log("Rollout finished" if req.execute else "Dry run finished; nothing changed", "ok")
             wave_of = {n: i + 1 for i, w in enumerate(p.waves) for n in w}
             models = {n: (state.nodes.get(n) or {}).get("model", "") for n in wave_of}
-            rows = [{**asdict(r), "wave": wave_of.get(r.node), "model": models.get(r.node, "")}
+            rows = [{**asdict(r), "wave": wave_of.get(r.node), "model": models.get(r.node, ""),
+                     "routing_label": LABELS.get(r.routing or protocols.get(r.node, ""), "")}
                     for r in rep.results]
             return {"version": release.version, "channel": release.channel, "waves": p.waves,
                     "warnings": extra_warn + p.warnings, "unreachable": sorted(p.unreachable),
                     "results": rows, "rc": rc, "backup_dir": str(backup_dir),
                     "ptmp_order": ptmp_order(req.nodes),
+                    "target_routing": LABELS[routing_of(release.version)],
                     "reason": rep.reason, "blocked": [r["node"] for r in rows if r["status"] == "failed"]}
 
         title = f"{'Upgrade' if req.execute else 'Dry run'} → {release.version} ({len(req.nodes)} nodes)"
@@ -394,6 +412,9 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
             async def one(n):
                 nonlocal ok
+                if why := old_firmware_reason(n):
+                    job.log(why, "warn")
+                    return
                 async with sem:
                     try:
                         s = await connect(n)
@@ -496,6 +517,15 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
         title = f"{'Radio change' if req.execute else 'Radio dry run'} ({len(req.nodes)} nodes)"
         return start("radio", title, req.execute, body, fp, dry_run=not req.execute)
 
+    def old_firmware_reason(n: str) -> str | None:
+        """Radio and settings jobs need the ucode web UI (3.25.5 and later); say so plainly."""
+        from ..routing import OLSR, routing_of
+        fw = (state.nodes.get(n) or {}).get("firmware", "")
+        if routing_of(fw) == OLSR:
+            return (f"{n}: firmware {fw} is older than these jobs support (its web UI is Lua, "
+                    "not ucode). Upgrade it to an OLSR + Babel release first.")
+        return None
+
     # ------------------------------------------------------------ on/off settings (from node dialogs)
     @app.post("/api/settings/read")
     async def settings_read(req: NodesReq):
@@ -512,6 +542,9 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
             async def one(n):
                 nonlocal ok
+                if why := old_firmware_reason(n):
+                    job.log(why, "warn")
+                    return
                 async with sem:
                     try:
                         s = await connect(n)

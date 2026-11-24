@@ -9,6 +9,8 @@ before the next wave and never interrupts a node mid-flash.
 
 from __future__ import annotations
 
+from ..routing import routing_of
+
 import asyncio
 import json
 import time
@@ -289,6 +291,7 @@ class AppState:
                 "custom": custom_summary(self.overrides.get(n)),
                 "radios_read_at": (self.radios.get(n) or {}).get("read_at"),
                 "gateway": info.get("gateway"),
+                "routing": routing_of(info.get("firmware", "")),
             })
         return {"root": self.root, "discovered_at": self.discovered_at, "nodes": nodes,
                 "links": [l.__dict__ for l in self.topology.links]}

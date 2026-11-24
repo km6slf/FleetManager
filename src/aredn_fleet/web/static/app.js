@@ -93,6 +93,7 @@ function renderNodes() {
       <td><b>${esc(n.name)}</b> ${n.name === state.topo.root ? '<span class="badge root">this computer</span>' : ""}
           ${n.reachable ? "" : '<span class="badge failed">unreachable</span>'}
           ${n.gateway ? '<span class="badge gateway" title="Shares its internet (WAN) connection with the mesh">gateway</span>' : ""}
+          ${ROUTING_BADGE[n.routing] || ""}
           ${n.custom ? `<span class="badge custom" data-edit="${esc(n.name)}" title="${esc(n.custom.text + (n.custom.note ? " — " + n.custom.note : ""))}">custom</span>` : ""}</td>
       <td class="model" title="${esc(n.model)}">${esc(n.model)}</td>
       <td class="${old ? "fw-old" : ""}" title="${old ? "older than " + esc(latest) : ""}">${esc(n.firmware)}</td>
@@ -434,6 +435,14 @@ $("#btn-ra-go").addEventListener("click", (e) => guarded(async () => {
   followJob(job.id, { onDone: () => loadTopology() });
 }));
 
+// Routing protocol from the node's firmware version (OLSR-only nodes need a dual-protocol
+// release before Babel-only firmware; Babel nodes are the norm, so they get no badge).
+const ROUTING_BADGE = {
+  olsr: '<span class="badge olsr" title="Speaks only OLSR (firmware before 3.25.5). Babel-only nodes can\'t see it. Upgrade it to an OLSR + Babel release (3.25.5.0 or later 3.25.x) before any Babel-only firmware.">OLSR</span>',
+  dual: '<span class="badge dual" title="Speaks OLSR and Babel (3.25.5 to 3.25.10): the bridge between old and new nodes">OLSR+Babel</span>',
+  unknown: '<span class="badge unknown" title="Nightly firmware: routing protocol can\'t be told from the version">routing?</span>',
+};
+
 // ------------------------------------------------------------------ node settings (from node dialogs)
 let settingsInfo = null;
 
@@ -568,14 +577,14 @@ function upgradeLedger(r) {
       const st = x.status === "would-upgrade" ? '<span class="st-go">will upgrade</span>'
         : x.status === "skipped" ? '<span class="st-skip">already current</span>'
         : '<span class="st-blocked">BLOCKED</span>';
-      return `<tr><td><b>${esc(x.node)}</b></td><td>${esc(x.model)}</td><td>${esc(x.profile || "")}</td>
+      return `<tr><td><b>${esc(x.node)}</b>${x.routing_label ? `<div class="muted small">${esc(x.routing_label)}</div>` : ""}</td><td>${esc(x.model)}</td><td>${esc(x.profile || "")}</td>
         <td class="${x.from_version === x.to_version ? "same" : "chg"}">${esc(x.from_version || "?")}<span class="arrow">→</span><b>${esc(x.to_version)}</b></td>
         <td>${st}</td><td class="why">${x.status === "failed" ? esc(x.detail) : ""}${(x.notes || []).map((n) => `<div class="lost">⚠ ${esc(n)}</div>`).join("")}</td></tr>`;
     }).join("")).join("");
   const warns = [...(r.warnings || []), ...(r.unreachable?.length ? ["Skipped, unreachable: " + r.unreachable.join(", ")] : [])]
     .map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("");
   const apFirst = (r.ptmp_order || []).map(([a, s]) => `${a} before ${s}`).join(", ");
-  return `<p class="summary-line"><b>${go}</b> node(s) will be upgraded to <b>${esc(r.version)}</b> (${esc(r.channel)}), outermost first, one wave at a time. Each wave is checked before the next starts, and the run stops at the first failure.</p>
+  return `<p class="summary-line"><b>${go}</b> node(s) will be upgraded to <b>${esc(r.version)}</b> (${esc(r.channel)}; routing: ${esc(r.target_routing || "?")}), outermost first, one wave at a time. Each wave is checked before the next starts, and the run stops at the first failure.</p>
     <p class="summary-line">Before each node is flashed, its configuration is backed up to <code>${esc(r.backup_dir)}</code> (it can include the node's password hash and Wi-Fi keys; it stays on this computer).</p>
     ${apFirst ? `<p class="summary-line">PtMP access points go before their Mesh Stations: ${esc(apFirst)}.</p>` : ""}
     ${r.rc ? `<p class="summary-line"><b>Release-candidate checks are on:</b> Mesh Stations wait for their access point to run 4.26.7.0 or the RC; AC radios using channels 48, 52, 56 or 64 (also through a wide channel) are blocked; IPQ40xx nodes on 4.26.7.0 are flagged for a possible power cycle.</p>` : ""}
@@ -702,6 +711,7 @@ $("#btn-fetch").addEventListener("click", () => guarded(async () => {
   if (scope === "board" && !boards.length) throw new Error("Enter at least one board name");
   const job = await api("/api/firmware/fetch", { body: {
     scope, boards, stable: +$("#fw-stable").value || 2, nightly: $("#fw-nightly").checked, include_factory: $("#fw-factory").checked,
+    version: $("#fw-version").value.trim() || null,
   } });
   followJob(job.id, { onDone: loadFirmware });
 }));

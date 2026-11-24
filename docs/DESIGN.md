@@ -69,6 +69,24 @@ These come from `aredn_fleet/rc.py`. They apply when the target is an RC nightly
 * **IPQ40xx reboot freeze.** `ipq40xx` hardware upgrading *from* 4.26.7.0 gets a review warning that it may need one power cycle. If it doesn't come back, the failure says this is the likely cause.
 * **Radio details after an upgrade.** They're re-read when an upgrade succeeds, and stored with the firmware they were read on. Details read on other firmware are marked out of date and excluded from radio choices until read again.
 
+### Older firmware and the OLSR → Babel move
+From AREDN's release notes: up to 3.25.4 nodes speak only OLSR; 3.25.5.0–3.25.10.0 speak OLSR and Babel side by side; 4.26.1.0 and later speak only Babel. Babel-only nodes don't know OLSR-only nodes exist. (`aredn_fleet/routing.py`)
+* **Routing per node** comes from its firmware version, shown as an **OLSR** / **OLSR+Babel** badge in the Nodes table (Babel is the norm and gets none; date-named nightlies before 2026-01-14 show "routing?"). During an upgrade the running daemons (`pidof olsrd`, `pidof babeld`) are checked too.
+* **Migration rule** for a Babel-only target, judged on the mesh as it will be after the run, repeated until stable because a blocked node stays where it is:
+  * an OLSR-only node is blocked: it must go to an OLSR + Babel release first;
+  * a node is blocked if, afterwards, nothing on its path back to this computer speaks Babel;
+  * a node is blocked if OLSR-only nodes reach an OLSR + Babel "bridge" only through it (the reason names them). Only the last bridge in front of them is held back.
+  Moving to an OLSR + Babel release is never blocked by this.
+* **Last release per hardware:** AREDN drops hardware (the 32 MB `ath79/tiny` units, e.g. the NanoStation M XM, stop at **3.25.5.1**). `ReleaseIndex` searches every stable release's catalog for the node's board name (cached on disk; stable releases don't change). If the chosen release has no image for a node, the review says which release is its last. The Firmware tab can download one specific release.
+* **Older status page:** api_version 1.x at `/cgi-bin/sysinfo.json` (port 80, or 8080 on the oldest), with numbers as text and `link_info` as `[]` when empty. Discovery reads both formats.
+* **Older upgrade procedure**, told apart by the node's own `aredn_sysupgrade` (newer ones archive the settings themselves). For older ones Fleet Manager does what the node's Firmware page does with "Keep settings":
+  1. archive every existing path in `/etc/arednsysupgrade.conf` into `/tmp/arednsysupgradebackup.tgz` (a copy is saved on this computer as the backup);
+  2. check the image with `validate_firmware_image` and the node's `firmwarecheck.sh` after dropping caches;
+  3. detached: set `nodeupgraded` with the node's own Lua (`aredn.info.set_nvram`), stop the services listed in the node's `upgrade_prepare.sh` except dropbear (so a failure can still be read), then `aredn_sysupgrade -f <archive> -q <image>`. If sysupgrade returns, nothing was flashed: the flag and services are restored;
+  4. wait through the second reboot older firmware does to apply the kept settings, then verify as usual.
+* Radio and settings jobs need the ucode web UI (3.25.5+); for older nodes they say so and skip them.
+* **Field check (2026-11-24):** NanoStation M2 XM on 3.23.8.0 (Lua UI, `olsrd` with jsoninfo on 9090, DtD on IPv4 `/8`, IPv6 off, 28 MB RAM / 13.8 MB `/tmp`). Cabled to the Babel-only hAP's DtD port, neither saw the other: the hAP's DtD bridge has no IPv4 address.
+
 ## Radio settings (channel / width / mode)
 Changing an RF node's channel, width, or mode cuts its RF links to every neighbor still on the old settings, so working edge-inward one node at a time would strand each node as it goes. Instead, each **RF cluster** switches together.
 
@@ -238,6 +256,8 @@ Fleet Manager doesn't carry a list of AREDN settings: they change between releas
 * [x] Review ledger before execute (wave order / per-radio before→after), execution bound to the reviewed dry run
 * [x] RC safeguards: pre-flash config backups, PtMP AP before stations, removed AC channels blocked, IPQ40xx freeze warning, radio re-read/out-of-date marking
 * [x] Node settings learned from each node's own dialogs (labels, rules, save handler), bulk on/off job with review; radio purposes from the node's hardware module
+* [x] OLSR-era nodes: old status page, routing badge, migration rule, last release per hardware, older upgrade procedure (tested against a simulated node; recon from a real 3.23.8.0 NanoStation)
+* [ ] First real upgrade of an older node (NanoStation M2 XM 3.23.8.0 → 3.25.5.1)
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)
 * [x] Nightly recon (3 passes): new channel-list format and setter names supported
 * [ ] Multi-channel Mesh Stations (`radioN_channels`)

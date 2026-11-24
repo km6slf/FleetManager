@@ -146,6 +146,58 @@ class Catalog:
         return Release(chan.name, overview.get("release", chan.version), profiles)
 
 
+# --------------------------------------------------------------------------- last release per hardware
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+class ReleaseIndex:
+    """Which stable releases include a given piece of hardware, from AREDN's own catalog.
+
+    AREDN drops hardware over time (the 32 MB ``ath79/tiny`` units stop at 3.25.5.1), so the
+    newest release isn't always an option. Stable releases never change, so their overview and
+    profile files are cached on disk and each is fetched once.
+    """
+
+    def __init__(self, catalog: Catalog, cache_dir: Path):
+        self.cat = catalog
+        self.dir = Path(cache_dir)
+
+    def _cached(self, version: str, path: str) -> dict:
+        f = self.dir / version / path.replace("/", "__")
+        if f.exists():
+            return json.loads(f.read_text())
+        data = self.cat._json(path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(data))
+        return data
+
+    def stable_versions(self) -> list[tuple[str, str]]:
+        v = self.cat.versions()
+        return sorted(((k, d) for k, d in v.items() if STABLE_RE.match(k)),
+                      key=lambda kv: _stable_key(kv[0]), reverse=True)
+
+    def final_release(self, board: str = "", model: str = "") -> str | None:
+        """Newest stable release with an image for this board (``/tmp/sysinfo/board_name``).
+        Candidates come from the board name (OpenWrt ids are the board name with ``,`` → ``_``)
+        or the model title; the board name in ``supported_devices`` decides."""
+        want_id = board.replace(",", "_") if board else ""
+        nm = _norm(model) if model else ""
+        for ver, data_dir in self.stable_versions():
+            ov = self._cached(ver, f"afs/www/{data_dir}/overview.json")
+            for p in ov.get("profiles", []):
+                titles = [_norm(_title(t)) for t in p.get("titles", [])]
+                if not (p["id"] == want_id or (nm and nm in titles)):
+                    continue
+                if not board:
+                    return ver
+                d = self._cached(ver, f"afs/www/{data_dir}/{p['target']}/{p['id']}.json")
+                if board in d.get("supported_devices", []):
+                    return ver
+        return None
+
+
 # --------------------------------------------------------------------------- matching
 
 def match_profile(release: Release, board_name: str = "", model: str = "") -> list[Profile]:

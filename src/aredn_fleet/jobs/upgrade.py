@@ -30,6 +30,8 @@ from ..firmware import FirmwareStore, Release, match_profile
 from ..rc import at_least_4267, ipq40xx_freeze_note, removed_channel_conflict, station_radios
 from .radio import read_node_radios
 from ..topology import Plan
+from ..discovery import link_entries
+from ..routing import BABEL, OLSR, ROUTING_CMD, routing_from_daemons, routing_of
 from ..transport import NodeSession, detached
 
 SysinfoFetch = Callable[[str], Awaitable[dict[str, Any] | None]]
@@ -51,6 +53,8 @@ class UpgradeConfig:
     launch_check_seconds: float = 8
     backup_dir: Path | None = None   # save each node's config here before flashing
     rc_checks: bool = False          # target is the release candidate (or later)
+    # Older firmware applies its settings after the upgrade and reboots a second time.
+    second_reboot_seconds: float = 240
 
 
 @dataclass
@@ -63,6 +67,8 @@ class NodeResult:
     profile: str = ""
     notes: list[str] = field(default_factory=list)   # non-blocking warnings for the review
     backup: str = ""
+    routing: str = ""        # olsr / dual / babel as seen on the node (running daemons)
+    method: str = ""         # "current" or "legacy" upgrade procedure
 
 
 class AuditLog:
@@ -79,7 +85,7 @@ class AuditLog:
 
 def _rf_neighbours(sysinfo: dict[str, Any] | None) -> set[str]:
     out = set()
-    for e in ((sysinfo or {}).get("link_info") or {}).values():
+    for e in link_entries(sysinfo or {}):
         if e.get("hostname") and str(e.get("linkType", "")).upper() == "RF":
             out.add(e["hostname"].lower().removesuffix(".local.mesh"))
     return out
@@ -89,7 +95,7 @@ def _neighbours(sysinfo: dict[str, Any] | None) -> set[str]:
     if not sysinfo:
         return set()
     out = set()
-    for e in (sysinfo.get("link_info") or {}).values():
+    for e in link_entries(sysinfo or {}):
         if e.get("hostname") and str(e.get("linkType", "")).upper() in ("RF", "DTD", ""):
             out.add(e["hostname"].lower().removesuffix(".local.mesh"))
     return out
@@ -130,9 +136,8 @@ class NodeUpgrade:
     earlier: set[str] = field(default_factory=set)    # nodes this run upgrades before this one
     in_run: set[str] = field(default_factory=set)     # every node in this run
     access_points: set[str] | None = None             # this station's PtMP AP(s); None = unknown
-    earlier: set[str] = field(default_factory=set)    # nodes this run upgrades before this one
-    in_run: set[str] = field(default_factory=set)     # every node in this run
-    access_points: set[str] | None = None             # this station's PtMP AP(s); None = unknown
+    blocked: str | None = None        # refused before logging in (e.g. routing migration order)
+    final_release: Callable[[str, str], str | None] | None = None   # (board, model) -> last release
 
     async def run(self, execute: bool) -> NodeResult:
         res = NodeResult(self.node, to_version=self.release.version)
@@ -160,8 +165,36 @@ class NodeUpgrade:
         before = await self.sysinfo(self.node)
         res.from_version = _fw(before)
         model = str(((before or {}).get("node_details") or {}).get("model", ""))
+        if self.blocked:
+            return self._fail(res, self.blocked)
+
+        # How this node's firmware upgrades, and which routing daemons it runs, from the node.
+        probe = (await s.run(STYLE_CMD + "; " + ROUTING_CMD)).stdout
+        legacy = "legacy" in probe
+        res.method = "legacy" if legacy else "current"
+        res.routing = routing_from_daemons(probe) or ""
+        if legacy:
+            if "keepfile" not in probe:
+                return self._fail(res, "older firmware without /etc/arednsysupgrade.conf: can't tell "
+                                       "which settings to keep, so not upgrading it")
+            res.notes.append("Older firmware: upgraded the way its own Firmware page does it "
+                             "(settings from /etc/arednsysupgrade.conf, then a second reboot to "
+                             "apply them).")
+        if routing_of(self.release.version) == BABEL and res.routing == OLSR:
+            return self._fail(res, "the node runs only OLSR: going straight to Babel-only firmware "
+                                   "would cut it off. Upgrade it to an OLSR + Babel release "
+                                   "(3.25.5.0 or later 3.25.x) first.")
 
         matches = match_profile(self.release, board_name=board, model=model)
+        if not matches and self.final_release:
+            try:
+                last = await asyncio.to_thread(self.final_release, board, model)
+            except Exception:  # noqa: BLE001 - only improves the message
+                last = None
+            if last:
+                return self._fail(res, f"{self.release.version} has no image for this hardware "
+                                       f"({board or model}). Its last release is {last}: upgrade it "
+                                       f"to {last} in a separate run.")
         if len(matches) != 1:
             names = ", ".join(p.id for p in matches) or "none"
             return self._fail(res, f"board {board!r} / model {model!r} matched {names}; need exactly one")
@@ -191,7 +224,7 @@ class NodeUpgrade:
             leftover = 0
         if avail:
             avail += leftover // 1024
-        need = image.size // 1024 + self.cfg.ram_margin_kb
+        need = image.size // 1024 + self.cfg.ram_margin_kb + (256 if legacy else 0)
         if avail and avail < need:
             return self._fail(res, f"not enough RAM for image in /tmp: {avail} kB free, need {need} kB")
 
@@ -205,9 +238,16 @@ class NodeUpgrade:
             return res
 
         # ---- point of no return starts below; log every step
+        if legacy:
+            # The settings archive the old Firmware page builds; sysupgrade restores from it.
+            try:
+                await self._legacy_archive(s)
+            except Exception as exc:  # noqa: BLE001
+                return self._fail(res, f"couldn't save the node's settings ({exc}); not upgrading")
         if self.cfg.backup_dir:
             try:
-                res.backup = await self._backup(s, res.from_version)
+                res.backup = await (self._legacy_backup(s, res.from_version) if legacy
+                                    else self._backup(s, res.from_version))
             except Exception as exc:  # noqa: BLE001
                 return self._fail(res, f"config backup failed ({exc}); not upgrading without one")
             self.log(self.node, "backup", path=res.backup)
@@ -227,9 +267,24 @@ class NodeUpgrade:
             await s.run(f"rm -f {REMOTE_IMAGE}")
             return self._fail(res, f"node rejected image: {check.stdout.strip()[:300]}")
 
+        if legacy:
+            # The old Firmware page also runs its own image check after dropping caches.
+            chk = (await s.run("echo 3 > /proc/sys/vm/drop_caches; "
+                               "[ -x /usr/local/bin/firmwarecheck.sh ] && "
+                               f"/usr/local/bin/firmwarecheck.sh {REMOTE_IMAGE}")).stdout.strip()
+            if chk:
+                await s.run(f"rm -f {REMOTE_IMAGE} {LEGACY_ARCHIVE}")
+                return self._fail(res, f"node rejected image: {chk[:300]}")
+
         neighbours = _neighbours(before)
-        self.log(self.node, "sysupgrade", neighbours=sorted(neighbours), validated=valid)
-        await s.run(detached(f"{self.cfg.sysupgrade_cmd} {REMOTE_IMAGE}", UPGRADE_LOG), timeout=30)
+        self.log(self.node, "sysupgrade", neighbours=sorted(neighbours), validated=valid,
+                 method=res.method)
+        if legacy:
+            await s.run(f"cat > {LEGACY_SCRIPT} <<'FLEETEOF'\n"
+                        f"{legacy_upgrade_script(self.cfg.sysupgrade_cmd)}\nFLEETEOF", timeout=20)
+            await s.run(detached(f"sh {LEGACY_SCRIPT}", UPGRADE_LOG), timeout=30)
+        else:
+            await s.run(detached(f"{self.cfg.sysupgrade_cmd} {REMOTE_IMAGE}", UPGRADE_LOG), timeout=30)
 
         # aredn_sysupgrade backs up the config (it stops babel first) before
         # flashing. A failure there prints "ERROR:" and exits; catch it, or a
@@ -259,6 +314,15 @@ class NodeUpgrade:
             hint = (" This is probably the IPQ40xx reboot freeze: power-cycle the node."
                     if any("IPQ40xx" in n for n in res.notes) else "")
             return self._fail(res, "node did not come back within up_timeout." + hint)
+        if legacy:
+            # Old firmware reboots once more, soon after coming up, while it applies the kept
+            # settings. Let that happen before judging the result.
+            self.log(self.node, "up-first", firmware=_fw(await self.sysinfo(self.node)))
+            if await self._wait(lambda si: si is None, self.cfg.second_reboot_seconds):
+                if not await self._wait(lambda si: si is not None, self.cfg.up_timeout):
+                    return self._fail(res, "node didn't come back after its second reboot "
+                                           "(the one that applies the kept settings)")
+                self.log(self.node, "second-reboot-done")
         after = await self.sysinfo(self.node)
         if _fw(after) != self.release.version:
             return self._fail(res, f"came back on {_fw(after)!r}, expected {self.release.version}")
@@ -327,6 +391,28 @@ class NodeUpgrade:
         out.write_bytes(data)
         return str(out)
 
+    async def _legacy_archive(self, s: NodeSession) -> None:
+        """Build /tmp/arednsysupgradebackup.tgz exactly as the old Firmware page does: every
+        existing, non-comment path in /etc/arednsysupgrade.conf, archived with tar."""
+        out = (await s.run(
+            "grep -v '^#' /etc/arednsysupgrade.conf | while read f; do "
+            "[ -n \"$f\" ] && [ -e \"$f\" ] && echo \"$f\"; done > /tmp/sysupgradefilelist && "
+            f"tar -czf {LEGACY_ARCHIVE} -T /tmp/sysupgradefilelist >/dev/null 2>&1 && "
+            f"rm -f /tmp/sysupgradefilelist && wc -c < {LEGACY_ARCHIVE}", timeout=60)).stdout.strip()
+        if not out.isdigit() or int(out) < 20:
+            raise ValueError("tar didn't produce the settings archive")
+
+    async def _legacy_backup(self, s: NodeSession, from_version: str) -> str:
+        """Keep a copy of that same archive on this computer (it stays on the node for sysupgrade)."""
+        data = await s.download(LEGACY_ARCHIVE)
+        if len(data) < 20 or data[:2] != b"\x1f\x8b":
+            raise ValueError("the node's settings archive isn't a valid backup file")
+        d = Path(self.cfg.backup_dir) / self.node
+        d.mkdir(parents=True, exist_ok=True)
+        out = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{from_version or 'unknown'}.tgz"
+        out.write_bytes(data)
+        return str(out)
+
     async def _reread_radios(self) -> None:
         """Channel lists can change with firmware (the RC drops some); refresh them."""
         if not self.on_inventory:
@@ -371,6 +457,39 @@ class NodeUpgrade:
             await self.sleep(self.cfg.poll_interval)
 
 
+# How the node's own aredn_sysupgrade behaves: newer ones archive the settings themselves.
+STYLE_CMD = ("grep -qE 'arednsysupgradebackup|configuration.backup' "
+             "/usr/local/bin/aredn_sysupgrade 2>/dev/null && echo self-backup || echo legacy; "
+             "[ -f /etc/arednsysupgrade.conf ] && echo keepfile; true")
+LEGACY_ARCHIVE = "/tmp/arednsysupgradebackup.tgz"
+LEGACY_SCRIPT = "/tmp/aredn-fleet-legacy-upgrade.sh"
+
+
+def legacy_upgrade_script(sysupgrade_cmd: str) -> str:
+    """Run detached on older firmware, mirroring its Firmware page ("Keep settings"):
+
+    1. set the nodeupgraded flag with the node's own Lua helper (it re-applies settings at boot);
+    2. stop the services the node's upgrade_prepare.sh lists, to free RAM, except dropbear so
+       this tool can still read the log if something fails before the flash;
+    3. aredn_sysupgrade -f <settings archive> -q <image>.
+    If sysupgrade returns, nothing was flashed: undo 1 and 2 and say so.
+    """
+    return f"""#!/bin/sh
+lua -e 'require("aredn.info").set_nvram("nodeupgraded", "1")' || {{ echo "ERROR: couldn't set nodeupgraded"; exit 1; }}
+for S in $(sed -n 's/^SERVICES="\(.*\)"$/\1/p' /usr/local/bin/upgrade_prepare.sh 2>/dev/null); do
+  srv=${{S%%:*}}; d=$(echo "$S" | cut -d: -f2 -s)
+  [ "$srv" = dropbear ] && continue
+  [ -n "$d" ] && killall -KILL "$d" 2>/dev/null
+  [ -x "/etc/init.d/$srv" ] && "/etc/init.d/$srv" stop >/dev/null 2>&1
+done
+echo 3 > /proc/sys/vm/drop_caches
+{sysupgrade_cmd} -f {LEGACY_ARCHIVE} -q {REMOTE_IMAGE}
+echo "ERROR: sysupgrade returned $? without flashing"
+lua -e 'require("aredn.info").set_nvram("nodeupgraded", "0")'
+/usr/local/bin/upgrade_prepare.sh restore >/dev/null 2>&1
+rm -f {REMOTE_IMAGE} {LEGACY_ARCHIVE}"""
+
+
 def _launch_failed(log: str) -> bool:
     """The upgrade log shows it never got going (missing command, script error)."""
     return any(s in log for s in ("ERROR", "not found", "No such file", "Permission denied",
@@ -392,8 +511,12 @@ async def run_rollout(plan: Plan, release: Release, store: FirmwareStore, connec
                       on_result: Callable[[NodeResult], None] | None = None,
                       should_stop: Callable[[], bool] | None = None,
                       on_inventory: Callable[[str, Any], None] | None = None,
-                      access_points: dict[str, set[str]] | None = None) -> RolloutReport:
-    """``access_points`` maps a Mesh Station to its PtMP access point(s), where known."""
+                      access_points: dict[str, set[str]] | None = None,
+                      blocked: dict[str, str] | None = None,
+                      final_release: Callable[[str, str], str | None] | None = None) -> RolloutReport:
+    """``access_points`` maps a Mesh Station to its PtMP access point(s), where known.
+    ``blocked`` refuses nodes for plan-level reasons (e.g. the OLSR -> Babel migration order).
+    ``final_release`` looks up the last release for a node's hardware, for a clearer message."""
     cfg = cfg or UpgradeConfig()
     log = AuditLog(audit)
     log("-", "rollout-start", execute=execute, version=release.version, waves=plan.waves)
@@ -409,7 +532,7 @@ async def run_rollout(plan: Plan, release: Release, store: FirmwareStore, connec
             return RolloutReport(results, True, reason)
         jobs = [NodeUpgrade(n, release, store, connect, sysinfo, cfg, log,
                             plan.dependents.get(n, set()), sleep, clock, on_inventory, earlier, in_run,
-                            (access_points or {}).get(n))
+                            (access_points or {}).get(n), (blocked or {}).get(n), final_release)
                 for n in wave]
         wave_results = await asyncio.gather(*(j.run(execute) for j in jobs))
         for r in wave_results:

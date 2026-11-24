@@ -1,3 +1,4 @@
+from pathlib import Path
 import sys
 import pytest
 import asyncio
@@ -36,11 +37,19 @@ class FakeMesh:
         return {n for n, k in self.reboot_polls.items() if k > 0}
 
     async def sysinfo(self, n):
+        second = getattr(self, "second", {})
+        if second.get(n) == "armed":              # older firmware: one more reboot after coming up
+            second[n] = "done"
+            self.reboot_polls[n] = 2
         if n in self.reboot_polls and self.reboot_polls[n] > 0:
             self.reboot_polls[n] -= 1
             if self.reboot_polls[n] == 0 and n not in self.broken:
-                self.version[n] = "4.26.10.0"
+                self.version[n] = getattr(self, "next_version", "4.26.10.0")
+                if n in getattr(self, "legacy", set()) and n not in second:
+                    self.second = {**second, n: "pending"}
             return None
+        if second.get(n) == "pending":
+            second[n] = "armed"
         return {"node": n, "node_details": {"firmware_version": self.version[n], "model": "Rocket M"},
                 "link_info": {str(i): {"hostname": f"{x}.local.mesh", "linkType": "RF"}
                               for i, x in enumerate(self.neighbours(n)) if x not in self.down()}}
@@ -53,6 +62,21 @@ class FakeMesh:
 
             async def run(self, cmd, timeout=60):
                 mesh.commands.append((n, cmd))
+                if "configuration.backup' " in cmd:      # STYLE_CMD + ROUTING_CMD probe
+                    if n in getattr(mesh, "legacy", set()):
+                        return CommandResult(0, "legacy\nkeepfile\nolsrd\n", "")
+                    return CommandResult(0, "self-backup\nkeepfile\nbabeld\n", "")
+                if cmd.startswith("cat > /tmp/aredn-fleet-legacy-upgrade.sh"):
+                    mesh.legacy_script = cmd
+                    return CommandResult(0, "", "")
+                if "sh /tmp/aredn-fleet-legacy-upgrade.sh" in cmd:
+                    mesh.reboot_polls[n] = 3
+                    return CommandResult(0, "", "")
+                if "arednsysupgrade.conf | while read" in cmd:
+                    mesh.backups.add(n)
+                    return CommandResult(0, "2048\n", "")
+                if "firmwarecheck.sh" in cmd:
+                    return CommandResult(0, getattr(mesh, "fwcheck", ""), "")
                 if "board_name" in cmd:
                     return CommandResult(0, "ubnt,rocket-m\n", "")
                 if "meminfo" in cmd:
@@ -87,6 +111,11 @@ class FakeMesh:
             async def close(self):
                 pass
         return S()
+
+
+def _launch(c):
+    """A command that starts an upgrade (not the read-only probe that greps the script)."""
+    return "aredn_sysupgrade" in c and "configuration.backup' " not in c
 
 
 def radio5(mode="mesh", ch=131, bw=10):
@@ -134,7 +163,7 @@ def test_dry_run_changes_nothing(tmp_path):
     rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, execute=False, sleep=no_sleep))
     assert {r.status for r in rep.results} == {"would-upgrade"}
     assert not mesh.uploaded
-    assert not any("sysupgrade" in c for _, c in mesh.commands)
+    assert not any(_launch(c) for _, c in mesh.commands)
 
 
 def test_execute_upgrades_edge_first(tmp_path):
@@ -148,7 +177,7 @@ def test_execute_upgrades_edge_first(tmp_path):
     assert not rep.stopped_early, rep.reason
     assert [r.node for r in rep.results][-1] == "hub"
     assert all(v == "4.26.10.0" for v in mesh.version.values())
-    upgrade_order = [n for n, c in mesh.commands if "aredn_sysupgrade" in c]
+    upgrade_order = [n for n, c in mesh.commands if _launch(c)]
     assert upgrade_order.index("relay") > max(upgrade_order.index("far1"), upgrade_order.index("far2"))
     assert audit.read_text().count('"event": "ok"') == 4
 
@@ -161,7 +190,7 @@ def test_failure_stops_before_inner_nodes(tmp_path):
     rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, execute=True, sleep=no_sleep))
     assert rep.stopped_early
     assert mesh.version["relay"] == "4.26.7.0"
-    assert not any(n == "relay" and "sysupgrade" in c for n, c in mesh.commands)
+    assert not any(n == "relay" and _launch(c) for n, c in mesh.commands)
 
 
 def test_already_current_is_skipped(tmp_path):
@@ -181,7 +210,7 @@ def test_node_rejecting_image_never_flashes(tmp_path):
     plan = plan_rollout(t, "hub", ["far1"])
     rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, execute=True, sleep=no_sleep))
     assert rep.results[0].status == "failed" and "rejected image" in rep.results[0].detail
-    assert not any("aredn_sysupgrade" in c for _, c in mesh.commands)
+    assert not any(_launch(c) for _, c in mesh.commands)
 
 
 
@@ -216,7 +245,7 @@ def test_config_backup_saved_before_flashing(tmp_path):
     saved = list((tmp_path / "backups" / "far1").glob("*-4.26.7.0.tgz"))
     assert len(saved) == 1 and gzip.decompress(saved[0].read_bytes()) == b"config of far1"
     cmds = [c for n, c in mesh.commands if n == "far1"]
-    assert next(i for i, c in enumerate(cmds) if "c.backup" in c) < next(i for i, c in enumerate(cmds) if "aredn_sysupgrade" in c)
+    assert next(i for i, c in enumerate(cmds) if "c.backup" in c) < next(i for i, c in enumerate(cmds) if _launch(c))
 
 
 def test_no_backup_no_upgrade(tmp_path):
@@ -228,7 +257,7 @@ def test_no_backup_no_upgrade(tmp_path):
     rep = run(run_rollout(plan_rollout(t, "hub", ["far1"]), rel, store, mesh.connect, mesh.sysinfo, cfg,
                           execute=True, sleep=no_sleep))
     assert rep.results[0].status == "failed" and "backup" in rep.results[0].detail
-    assert not any("aredn_sysupgrade" in c for _, c in mesh.commands)
+    assert not any(_launch(c) for _, c in mesh.commands)
 
 
 def test_dry_run_takes_no_backup(tmp_path):
@@ -372,3 +401,68 @@ def test_detached_runs_under_posix_sh(tmp_path):
             break
         time.sleep(0.05)
     assert log.read_text().strip() == "started"
+
+
+def test_older_firmware_upgrades_like_its_own_firmware_page(tmp_path):
+    t = Topology()
+    t.add_link("hub", "ns")
+    mesh = FakeMesh(t, version="3.23.8.0")
+    mesh.legacy, mesh.next_version = {"ns"}, "3.25.5.1"
+    rel, store = release_and_store(tmp_path / "fw", version="3.25.5.1")
+    cfg = UpgradeConfig(**{**CFG.__dict__, "backup_dir": tmp_path / "bk", "second_reboot_seconds": 5})
+    rep = run(run_rollout(plan_rollout(t, "hub", ["ns"]), rel, store, mesh.connect, mesh.sysinfo, cfg,
+                          execute=True, sleep=no_sleep))
+    r = rep.results[0]
+    assert r.status == "ok", r.detail
+    assert r.method == "legacy" and r.routing == "olsr"
+    assert any("Firmware page" in n for n in r.notes)
+    assert Path(r.backup).exists()                       # same archive, kept on this computer too
+    s = mesh.legacy_script
+    assert 'set_nvram("nodeupgraded", "1")' in s
+    assert "-f /tmp/arednsysupgradebackup.tgz -q /tmp/aredn-fleet-upgrade.bin" in s
+    assert '[ "$srv" = dropbear ] && continue' in s
+    cmds = [c for _, c in mesh.commands]
+    assert next(i for i, c in enumerate(cmds) if "arednsysupgrade.conf | while read" in c) < \
+        next(i for i, c in enumerate(cmds) if "sh /tmp/aredn-fleet-legacy-upgrade.sh" in c)
+    assert mesh.second["ns"] == "done"                   # waited through the second reboot
+
+
+def test_olsr_only_node_refused_for_babel_only_target(tmp_path):
+    t = Topology()
+    t.add_link("hub", "ns")
+    mesh = FakeMesh(t, version="3.23.8.0")
+    mesh.legacy = {"ns"}
+    rel, store = release_and_store(tmp_path / "fw", version="4.26.10.0")
+    rep = run(run_rollout(plan_rollout(t, "hub", ["ns"]), rel, store, mesh.connect, mesh.sysinfo, CFG,
+                          execute=True, sleep=no_sleep))
+    r = rep.results[0]
+    assert r.status == "failed" and "only OLSR" in r.detail
+    assert not mesh.uploaded
+
+
+def test_older_firmware_image_check_failure_stops_before_flashing(tmp_path):
+    t = Topology()
+    t.add_link("hub", "ns")
+    mesh = FakeMesh(t, version="3.23.8.0")
+    mesh.legacy, mesh.next_version, mesh.fwcheck = {"ns"}, "3.25.5.1", "Unsupported hardware\n"
+    rel, store = release_and_store(tmp_path / "fw", version="3.25.5.1")
+    rep = run(run_rollout(plan_rollout(t, "hub", ["ns"]), rel, store, mesh.connect, mesh.sysinfo, CFG,
+                          execute=True, sleep=no_sleep))
+    r = rep.results[0]
+    assert r.status == "failed" and "Unsupported hardware" in r.detail
+    assert not any("legacy-upgrade.sh" in c for _, c in mesh.commands)
+
+
+def test_plan_level_block_and_final_release_message(tmp_path):
+    t = Topology()
+    t.add_link("hub", "ns")
+    mesh = FakeMesh(t, version="3.25.5.1")
+    rel, store = release_and_store(tmp_path / "fw")
+    plan = plan_rollout(t, "hub", ["ns"])
+    rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, sleep=no_sleep,
+                          blocked={"ns": "routing says no"}))
+    assert rep.results[0].status == "failed" and rep.results[0].detail == "routing says no"
+    rel.profiles = {}            # this release has no image for the hardware
+    rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, sleep=no_sleep,
+                          final_release=lambda board, model: "3.25.5.1"))
+    assert "last release is 3.25.5.1" in rep.results[0].detail
