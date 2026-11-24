@@ -230,7 +230,7 @@ Fleet Manager doesn't carry a list of AREDN settings: they change between releas
 * [x] SSH host-key pinning (TOFU + pin; keys confirmed to persist across sysupgrade)
 * [x] `aredn_sysupgrade` arguments and settings preservation confirmed from source on 4.26.1.0
 * [x] Windows install, discover, `firmware fetch --board`, upgrade dry run against the bench node: all good
-* [ ] First real upgrade on the bench node (4.26.1.0 → 4.26.10.0)
+* [x] Real upgrades on the bench node through the GUI: 4.26.1.0 → 4.26.10.0 → nightly 20261122 (after fixing the launch: BusyBox has no `nohup`)
 * [x] Radio settings job (synchronized switch per RF cluster, on-node auto-revert via pushed script; simulated-cluster tests)
 * [x] Per-band radio settings for 1- and 2-radio nodes (900 MHz, 2.4, 3.4, 5, 6 GHz), channel lists identical to the node's own dialog, multi-mesh probe
 * [x] Editable mesh SSID (group or per node) with live preview; never reset implicitly
@@ -239,7 +239,8 @@ Fleet Manager doesn't carry a list of AREDN settings: they change between releas
 * [x] RC safeguards: pre-flash config backups, PtMP AP before stations, removed AC channels blocked, IPQ40xx freeze warning, radio re-read/out-of-date marking
 * [x] Node settings learned from each node's own dialogs (labels, rules, save handler), bulk on/off job with review; radio purposes from the node's hardware module
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)
-* [ ] Nightly: run `tools/recon/recon-nightly.sh`, then multi-channel stations and the bulk settings job (internet bypass/sharing)
+* [x] Nightly recon (3 passes): new channel-list format and setter names supported
+* [ ] Multi-channel Mesh Stations (`radioN_channels`)
 * [ ] Package the revert script as the optional .ipk agent
 * [x] GUI (desktop window + headless serve), token auth, background jobs with stop; API tests; bundle self-test
 * [x] Windows installer + portable zip built in CI
