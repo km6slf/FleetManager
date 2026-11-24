@@ -434,3 +434,16 @@ def test_rc_channel_list_format_is_grouped_by_width_like_the_dialog():
     u = parse_radio_inventory(json.dumps(rc_state()), "multi-mesh", unlicensed=True).radios[0]
     assert u.label(60, 20) == "60 (5300) [dfs, 100 dB]"
     assert u.label(131, 20) == "131 (5655) [ham 30 dBm]"
+
+
+def test_supported_modes_come_from_the_node():
+    s = rc_state()
+    s["modes"] = [{"mesh": True, "meshap": False, "meshptp": True, "meshsta": True, "lan": True, "wan": True},
+                  {"mesh": False, "meshap": False, "meshptp": False, "meshsta": False, "lan": False, "wan": False}]
+    i = parse_radio_inventory(json.dumps(s), "multi-mesh")
+    assert i.radios[0].modes == ["lan", "mesh", "meshptp", "meshsta", "wan"]
+    assert i.radios[1].modes is None          # all false: the firmware didn't answer
+    with pytest.raises(ValueError, match="doesn't support Mesh PtMP"):
+        plan_node(i, [BandChange("5GHz", mode="meshap", channel=131, width=20)])
+    from aredn_fleet.jobs.radio import NodeRadios
+    assert NodeRadios.from_json(i.to_json()).radios[0].modes == i.radios[0].modes

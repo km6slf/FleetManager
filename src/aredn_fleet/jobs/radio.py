@@ -56,9 +56,17 @@ PERSIST_DIR = "/etc/aredn-fleet-radio"   # on flash: must survive the reboot
 REMOTE_SCRIPT = "/tmp/aredn-fleet-radio.sh"
 RC_LOCAL_LINE = f"[ -x {PERSIST_DIR}/boot-check ] && {PERSIST_DIR}/boot-check &"
 
+# getConfiguration() plus, per radio, which purposes its hardware supports, asked the way the
+# node's Radios & Antennas dialog asks (hardware.supportsFeature("wifi-mode", iface, mode)).
 RADIO_STATE_CMD = (
-    "ucode -e 'import * as r from \"aredn.radios\"; "
-    "printf(\"%J\", { config: r.getConfiguration() });'"
+    "ucode -e 'import * as r from \"aredn.radios\"; import * as h from \"aredn.hardware\"; "
+    "const c = r.getConfiguration(); const modes = []; "
+    "for (let i = 0; i < length(c); i++) { let m = null; "
+    "try { if (h.supportsFeature && c[i]) { m = {}; "
+    "for (let x in [\"mesh\", \"meshap\", \"meshptp\", \"meshsta\", \"lan\", \"wan\"]) "
+    "m[x] = h.supportsFeature(\"wifi-mode\", c[i].iface, x); } } catch (e) { m = null; } "
+    "push(modes, m); } "
+    "printf(\"%J\", { config: c, modes: modes });'"
 )
 # Whether the node shows unlicensed (Part 15) limits next to channels in its dialog.
 UNLICENSED_CMD = "uci -q -c /etc/config.mesh get setup.globals.radio_unlicensed"
@@ -66,6 +74,10 @@ UNLICENSED_CMD = "uci -q -c /etc/config.mesh get setup.globals.radio_unlicensed"
 CAPS_CMD = ("f=/app/main/status/e/radio-and-antenna.ut; "
             "if [ ! -f $f ]; then echo unknown; "
             "elif grep -q 'substr(radio0_mode, 0, 4) === substr(radio1_mode, 0, 4)' $f; "
+            "then echo single-mesh; "
+            # Newer dialogs instead turn the other radio off on hardware flagged only_one_radio.
+            "elif ucode -e 'import * as h from \"aredn.hardware\"; "
+            "print(h.supportsFeature(\"only_one_radio\") ? \"yes\" : \"no\");' 2>/dev/null | grep -q yes; "
             "then echo single-mesh; else echo multi-mesh; fi")
 # The revert timer is restarted from /etc/rc.local, which OpenWrt runs from /etc/init.d/done.
 BOOT_HOOK_CHECK = ("[ -f /etc/rc.local ] && ls /etc/rc.d/ 2>/dev/null | grep -q 'done$' "
@@ -154,6 +166,9 @@ class RadioInfo:
     channels: dict[str, list[dict[str, Any]]]   # width -> [{number, label, frequency}]
     managed_oob: list[int] = field(default_factory=list)
     ssid: str | None = None   # mesh SSID base ("AREDN"); only kept for mesh-mode radios
+    # Purposes this radio's hardware supports, as the node reports them; None = the firmware
+    # didn't say (older firmware), so nothing is ruled out on that basis.
+    modes: list[str] | None = None
 
     def channel_options(self, mode: str, bw: int | str) -> list[dict[str, Any]]:
         """Exactly the options the node's own Channel dropdown shows for this mode and width."""
@@ -191,8 +206,19 @@ class NodeRadios:
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "NodeRadios":
-        return cls([RadioInfo(**r) for r in d.get("radios", [])], d.get("multi_mesh"),
+        known = set(RadioInfo.__dataclass_fields__)
+        return cls([RadioInfo(**{k: v for k, v in r.items() if k in known}) for r in d.get("radios", [])],
+                   d.get("multi_mesh"),
                    d.get("read_at", 0), d.get("firmware", ""))
+
+
+def _supported_modes(m: Any) -> list[str] | None:
+    """Modes the node says the radio supports. All-false means the firmware didn't answer the
+    question (it would never offer no purpose at all), so treat that as unknown."""
+    if not isinstance(m, dict):
+        return None
+    yes = [k for k, v in m.items() if v is True]
+    return sorted(yes) if yes else None
 
 
 def _int_or_none(v: Any) -> int | None:
@@ -206,6 +232,7 @@ def parse_radio_inventory(raw: str, caps: str = "unknown", unlicensed: bool = Fa
     """Parse RADIO_STATE_CMD output. Keys and non-mesh SSIDs are deliberately dropped."""
     data = json.loads(raw)
     radios = []
+    reported = data.get("modes") or []
     for i, r in enumerate(data.get("config") or []):
         if not isinstance(r, dict):
             continue
@@ -219,7 +246,8 @@ def parse_radio_inventory(raw: str, caps: str = "unknown", unlicensed: bool = Fa
             bws=[int(b) for b in (r.get("bws") or [])], channels=chans,
             managed_oob=[int(x) for x in oob if _int_or_none(x) is not None],
             # The base name of a *mesh* SSID isn't secret; a WAN client's SSID/key are dropped.
-            ssid=(str(m.get("ssid")) if m.get("mode") in MESH_MODES and m.get("ssid") else None)))
+            ssid=(str(m.get("ssid")) if m.get("mode") in MESH_MODES and m.get("ssid") else None),
+            modes=_supported_modes(reported[i] if i < len(reported) else None)))
     multi = {"multi-mesh": True, "single-mesh": False}.get(caps.strip())
     return NodeRadios(radios, multi)
 
@@ -332,6 +360,10 @@ def plan_node(inv: NodeRadios, changes: list[BandChange]) -> NodePlan:
         if mode not in MESH_MODES and mode != "off":
             raise ValueError(f"{ch.band} radio is a {MODE_LABELS.get(mode, mode)}; the fleet "
                              f"manager only changes mesh radios (or turns them off)")
+        if ch.mode and ch.mode != "off" and r.modes is not None and ch.mode not in r.modes:
+            raise ValueError(f"{band_label(ch.band)}: this radio doesn't support "
+                             f"{MODE_LABELS.get(ch.mode, ch.mode)} (the node offers "
+                             f"{', '.join(MODE_LABELS.get(x, x) for x in r.modes)})")
         mode_changed = ch.mode is not None and ch.mode != r.mode
         width = ch.width if ch.width is not None else r.bandwidth
         channel = ch.channel if ch.channel is not None else r.channel

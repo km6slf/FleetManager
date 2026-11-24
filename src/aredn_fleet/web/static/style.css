@@ -158,3 +158,4 @@ dialog.wide { width: min(980px, 94vw); }
 .summary-line code { font-size: 11px; background: var(--bg); padding: 1px 4px; border-radius: 4px; }
 
 .badge.gateway { color: var(--accent); border-color: var(--accent); }
+.settings { width: 100%; border-collapse: collapse; table-layout: fixed; } .settings td { padding: 4px 2px; vertical-align: top; overflow-wrap: anywhere; } .settings td:last-child { width: 78px; text-align: right; } .settings select { width: 74px; } .small { font-size: 11px; } .settings .small { white-space: normal; }

@@ -91,6 +91,19 @@ class NodesReq(BaseModel):
     nodes: list[str]
 
 
+class SettingChangeReq(BaseModel):
+    key: str
+    on: bool
+
+
+class SettingsReq(BaseModel):
+    nodes: list[str]
+    changes: list[SettingChangeReq]
+    execute: bool = False
+    confirm: str = ""
+    reviewed_job: str | None = None
+
+
 class OverrideReq(BaseModel):
     radio: dict[str, BandChangeReq | dict] = {}
     note: str = ""
@@ -482,6 +495,94 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
         title = f"{'Radio change' if req.execute else 'Radio dry run'} ({len(req.nodes)} nodes)"
         return start("radio", title, req.execute, body, fp, dry_run=not req.execute)
+
+    # ------------------------------------------------------------ on/off settings (from node dialogs)
+    @app.post("/api/settings/read")
+    async def settings_read(req: NodesReq):
+        from ..jobs.settings import read_node_settings
+
+        if not req.nodes:
+            raise HTTPException(400, "select at least one node")
+
+        async def body(job: Job):
+            creds = state.creds()
+            connect = state.connect_factory(creds)
+            sem = asyncio.Semaphore(4)
+            ok = 0
+
+            async def one(n):
+                nonlocal ok
+                async with sem:
+                    try:
+                        s = await connect(n)
+                        try:
+                            ns = await read_node_settings(s)
+                        finally:
+                            await s.close()
+                    except Exception as exc:  # noqa: BLE001
+                        job.log(f"{n}: couldn't read settings ({exc})", "error")
+                        return
+                    state.set_settings(n, ns)
+                    ok += 1
+                    job.log(f"{n}: {len(ns.switches)} switches in its dialogs ({ns.firmware})", "ok")
+
+            job.log(f"Reading settings from {len(req.nodes)} node(s)' own dialogs over SSH…")
+            await asyncio.gather(*(one(n) for n in req.nodes))
+            state.save_creds(creds)
+            job.log(f"Read {ok} of {len(req.nodes)} node(s)", "ok" if ok == len(req.nodes) else "warn")
+        return start("settings-read", f"Read settings ({len(req.nodes)} nodes)", False, body)
+
+    @app.post("/api/settings/summary")
+    async def settings_summary(req: NodesReq):
+        return state.settings_summary(req.nodes)
+
+    @app.post("/api/settings")
+    async def settings_apply(req: SettingsReq):
+        from ..jobs.settings import SettingChange, apply_node_settings
+        from ..jobs.upgrade import AuditLog
+
+        if req.execute and req.confirm.strip().lower() != "apply":
+            raise HTTPException(400, "type 'apply' to confirm")
+        if not req.nodes or not req.changes:
+            raise HTTPException(400, "select nodes and choose at least one setting to change")
+        changes = [SettingChange(c.key, c.on) for c in req.changes]
+        # Outermost first, one node at a time, the node this computer uses last.
+        if state.root:
+            plan = make_plan(PlanReq(nodes=req.nodes, parallel=1, exclude_tunnels=False))
+            waves = plan.waves
+        else:
+            waves = []
+        order = [n for w in waves for n in w] + sorted(n for n in req.nodes if n not in
+                                                       {m for w in waves for m in w})
+        fp = fingerprint({"nodes": sorted(req.nodes), "changes": sorted((c.key, c.on) for c in changes)})
+        if req.execute and (why := state.jobs.reviewed(req.reviewed_job, "settings", fp)):
+            raise HTTPException(409, why)
+
+        async def body(job: Job):
+            creds = state.creds()
+            connect = state.connect_factory(creds)
+            log = AuditLog(state.audit_path)
+            out = {"order": order, "results": [], "blocked": []}
+            for n in order:
+                if job.stop_requested:
+                    job.log("stopped before the next node", "warn")
+                    break
+                r = await apply_node_settings(n, changes, connect, execute=req.execute,
+                                              on_read=state.set_settings, log=log)
+                out["results"].append(asdict(r))
+                lvl = {"failed": "error", "changed": "ok"}.get(r.status, "info")
+                job.log(f"{n}: {r.status}{' — ' + r.detail if r.detail else ''}", lvl)
+                if r.status == "failed":
+                    out["blocked"].append(n)
+                    if req.execute:
+                        job.status = "failed"
+                        job.log("stopped at the first failure", "error")
+                        break
+            state.save_creds(creds)
+            return out
+
+        title = f"{'Settings change' if req.execute else 'Settings dry run'} ({len(req.nodes)} nodes)"
+        return start("settings", title, req.execute, body, fp, dry_run=not req.execute)
 
     # ------------------------------------------------------------ node-specific settings
     @app.get("/api/overrides")

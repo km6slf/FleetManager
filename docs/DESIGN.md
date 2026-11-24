@@ -119,6 +119,17 @@ The job (`aredn-fleet radio`):
   * Verification checks the broadcast SSID with `iw`.
 * See `docs/NIGHTLY.md` for the release-candidate features: multi-radio mesh, multi-channel stations, internet bypass and more.
 
+## Node settings (learned from each node)
+Fleet Manager doesn't carry a list of AREDN settings: they change between releases. Instead it reads each node's own web dialogs (`/app/main/status/e/*.ut`, every template that has a switch) and parses them (`jobs/settings.py`):
+* **What the node shows:** each switch's label, short description and help text.
+* **What it reads:** the uci option in `/etc/config.mesh` and the rule: `!== "0"` (on unless 0), `=== "1"`, or `=== "0"` (inverted, like the WAN firewall switch reading `passthrough`).
+* **When it's disabled:** a `disabled:` variable defined in the same file from another option (e.g. `wan_passthrough`).
+* **What saving writes:** the save handler's `if ("<name>" in request.args) { … }` block. Only a block that sets exactly one option, as on/off, is changed in bulk. Anything else (the WAN firewall switch also turns three other settings off) is listed with the reason and left to the node's dialog.
+* Definitions depend only on firmware, so they're cached per firmware version; values are read per node with `uci -c /etc/config.mesh get`. Option names that look like secrets are never read or written.
+* **Applying** uses the dialog's own steps: `aredn.configuration.prepareChanges()`, `uci.cursor("/etc/config.mesh").set/commit`, `saveSettings()`, `commitChanges()` (node-setup decides what restarts or whether a reboot is needed). It runs detached, since networking may restart, then the values are read back. Nodes go one at a time, outermost first, the node this computer connects through last, stopping at the first failure. Same review-then-execute rule as upgrades (typed `apply`, bound to the reviewed dry run).
+* **GUI:** the "Node settings" card lists switches in the order the nodes show them, with the nodes' labels (several labels if firmware differs), counts on/off/not present/disabled, and Leave/On/Off.
+* Radio purposes come from the node too: `hardware.supportsFeature("wifi-mode", iface, mode)` per radio, as the Radios & Antennas dialog asks. Unsupported purposes aren't offered and are refused. Firmware that doesn't answer gets no restriction from this. The two-radio probe also asks `supportsFeature("only_one_radio")`.
+
 ## Node-specific settings
 * Any node can have its own radio settings per band: purpose, width, channel, SSID base and peer, plus a note saying why. They're stored in `config/overrides.json`, separate from discovery, so rediscovering doesn't lose them.
 * The node **stays in the group**: for firmware upgrades, and for radio bands where it has no own settings. **On a band with own settings, group radio changes don't apply to that node.** Its own values are applied, and every field left blank **keeps the node's current value**, not the group's (`merge_changes`). Own settings are (re)applied whenever the node is part of a radio job.
@@ -226,6 +237,7 @@ The job (`aredn-fleet radio`):
 * [x] Node-specific settings that stay in the group, with list marker, editor, merge, and expected-link logic
 * [x] Review ledger before execute (wave order / per-radio before→after), execution bound to the reviewed dry run
 * [x] RC safeguards: pre-flash config backups, PtMP AP before stations, removed AC channels blocked, IPQ40xx freeze warning, radio re-read/out-of-date marking
+* [x] Node settings learned from each node's own dialogs (labels, rules, save handler), bulk on/off job with review; radio purposes from the node's hardware module
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)
 * [ ] Nightly: run `tools/recon/recon-nightly.sh`, then multi-channel stations and the bulk settings job (internet bypass/sharing)
 * [ ] Package the revert script as the optional .ipk agent

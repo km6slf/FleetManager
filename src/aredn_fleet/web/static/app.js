@@ -204,7 +204,7 @@ let radioTimer = null;
 
 function scheduleRadioPanel() {
   clearTimeout(radioTimer);
-  radioTimer = setTimeout(() => guarded(loadRadioPanel), 150);
+  radioTimer = setTimeout(() => guarded(async () => { await loadRadioPanel(); await loadSettingsPanel(); }), 150);
 }
 
 async function loadRadioPanel() {
@@ -256,7 +256,10 @@ function bandHtml(b, ctx = { kind: "group" }) {
   const curMode = b.current_mode;
   const blank = ctx.kind === "node" ? `Keep current (${esc(MODE_NAMES[curMode] || curMode || "?")})`
     : curMode ? `Leave as is (${esc(MODE_NAMES[curMode] || curMode)})` : "Leave as is (mixed)";
-  const modeOpts = ["mesh", "meshap", "meshsta", "meshptp", "off"].map((m) => `<option value="${m}">${MODE_NAMES[m]}</option>`).join("");
+  // Only purposes every selected radio's hardware supports (as the nodes report it).
+  const modeOpts = ["mesh", "meshap", "meshsta", "meshptp", "off"]
+    .filter((m) => m === "off" || !b.supported_modes || b.supported_modes.includes(m))
+    .map((m) => `<option value="${m}">${MODE_NAMES[m]}</option>`).join("");
   const without = ctx.kind === "group" && b.without.length ? `<p class="hint">No ${esc(b.band_label)} radio on: ${esc(b.without.join(", "))}. They're left alone.</p>` : "";
   const ownHere = ctx.kind === "group" ? names.filter((n) => state.topo.nodes.find((x) => x.name === n)?.custom?.radio?.[b.band]) : [];
   const ownNote = ownHere.length ? `<p class="hint"><span class="own-tag">Own ${esc(b.band_label)} settings:</span> ${esc(ownHere.join(", "))}. Changes here don't apply to ${ownHere.length > 1 ? "them" : "it"}; ${ownHere.length > 1 ? "they keep" : "it keeps"} its own values, and anything not set there stays as it is now.</p>` : "";
@@ -429,6 +432,112 @@ $("#btn-ra-go").addEventListener("click", (e) => guarded(async () => {
   if (!ok) return;
   const job = await api("/api/radio", { body: { ...b, execute: true, confirm: "switch", reviewed_job: review.id } });
   followJob(job.id, { onDone: () => loadTopology() });
+}));
+
+// ------------------------------------------------------------------ node settings (from node dialogs)
+let settingsInfo = null;
+
+async function loadSettingsPanel() {
+  const nodes = [...state.selected];
+  const box = $("#settings-rows");
+  const miss = $("#settings-missing");
+  if (!nodes.length) {
+    settingsInfo = null;
+    miss.classList.add("hidden");
+    box.innerHTML = '<p class="hint">Select nodes to see their settings.</p>';
+    return;
+  }
+  const prev = settingsChoices();
+  settingsInfo = await api("/api/settings/summary", { body: { nodes } });
+  const need = [...settingsInfo.missing, ...settingsInfo.stale];
+  miss.classList.toggle("hidden", !need.length);
+  miss.querySelector("span").textContent = need.length
+    ? `Settings not read yet${settingsInfo.stale.length ? " (or read on other firmware)" : ""} for ${need.slice(0, 3).join(", ")}${need.length > 3 ? "…" : ""}.` : "";
+  if (!settingsInfo.rows.length) {
+    box.innerHTML = '<p class="hint">Read settings to see the switches these nodes offer.</p>';
+    return;
+  }
+  const n = settingsInfo.read.length;
+  box.innerHTML = `<table class="settings"><tbody>${settingsInfo.rows.map((r) => {
+    const notBulk = Object.keys(r.not_bulk).length === r.nodes.length;
+    const why = Object.values(r.not_bulk)[0] || "";
+    const counts = [`on ${r.on.length}`, `off ${r.off.length}`].concat(r.missing.length ? [`not on ${r.missing.length}`] : [])
+      .concat(r.disabled.length ? [`disabled on ${r.disabled.length}`] : []).join(" · ");
+    const tip = [r.descriptions.join(" / "), r.help, `Setting: ${r.key}`, `Dialog: ${r.dialogs.join(", ")}`,
+      r.on.length ? `On: ${r.on.join(", ")}` : "", r.off.length ? `Off: ${r.off.join(", ")}` : "",
+      r.missing.length ? `Not in the firmware of: ${r.missing.join(", ")}` : ""].filter(Boolean).join("\n");
+    const v = prev[r.key] ?? "";
+    return `<tr title="${esc(tip)}"><td><b>${esc(r.labels.join(" / "))}</b><div class="muted small">${esc(counts)} of ${n}</div>
+      ${notBulk ? `<div class="muted small">Set on the node: ${esc(why)}</div>` : ""}</td>
+      <td><select data-setting="${esc(r.key)}" ${notBulk ? "disabled" : ""}>
+        <option value="" ${v === "" ? "selected" : ""}>Leave</option>
+        <option value="on" ${v === "on" ? "selected" : ""}>On</option>
+        <option value="off" ${v === "off" ? "selected" : ""}>Off</option></select></td></tr>`;
+  }).join("")}</tbody></table>`;
+}
+
+function settingsChoices() {
+  const out = {};
+  document.querySelectorAll("#settings-rows select[data-setting]").forEach((s) => { if (s.value) out[s.dataset.setting] = s.value; });
+  return out;
+}
+
+function settingsBody(execute, confirm = "") {
+  const ch = Object.entries(settingsChoices()).map(([key, v]) => ({ key, on: v === "on" }));
+  if (!ch.length) throw new Error("Choose On or Off for at least one setting");
+  return { nodes: needSelection(), changes: ch, execute, confirm };
+}
+
+function labelFor(key) {
+  return (settingsInfo?.rows || []).find((r) => r.key === key)?.labels.join(" / ") || key;
+}
+
+function settingsLedger(r) {
+  const word = (b) => (b === true ? "on" : b === false ? "off" : "–");
+  let changing = 0;
+  const rows = r.results.map((x, i) => {
+    const head = `<td>${i + 1}</td><td><b>${esc(x.node)}</b></td>`;
+    if (x.status === "failed") return `<tr>${head}<td colspan="2"></td><td class="st-blocked">BLOCKED</td><td class="why">${esc(x.detail)}</td></tr>`;
+    if (x.status === "would-change") changing += 1;
+    return (x.steps || []).map((s, j) => {
+      const st = s.status === "change" ? '<span class="st-go">will change</span>'
+        : s.status === "unchanged" ? '<span class="st-skip">already set</span>'
+        : `<span class="st-skip">skipped</span>`;
+      const val = s.status === "change" || s.status === "unchanged"
+        ? cell(word(s.before), word(s.after)) : `<td class="same">${esc(word(s.before))}</td>`;
+      return `<tr>${j === 0 ? head : "<td></td><td></td>"}<td>${esc(s.label)}</td>${val}<td>${st}</td><td class="why">${esc(s.detail || "")}</td></tr>`;
+    }).join("");
+  }).join("");
+  return `<p class="summary-line"><b>${changing}</b> node(s) will change, one at a time, outermost first (the node this computer connects through last). Each change uses the node's own save and commit steps and is read back before the next node; the run stops at the first failure.</p>
+    <table class="ledger"><thead><tr><th>#</th><th>Node</th><th>Setting (node's label)</th><th>Now → after</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    ${r.blocked.length ? `<p class="st-blocked">Blocked: ${esc(r.blocked.join(", "))}. Fix these (or deselect them) and review again.</p>` : ""}`;
+}
+
+$("#btn-read-settings").addEventListener("click", () => guarded(async () => {
+  const nodes = settingsInfo && (settingsInfo.missing.length || settingsInfo.stale.length)
+    ? [...settingsInfo.missing, ...settingsInfo.stale] : needSelection();
+  const job = await api("/api/settings/read", { body: { nodes } });
+  toast("Reading settings…");
+  followJob(job.id, { quiet: true, onDone: () => loadSettingsPanel() });
+}));
+$("#btn-se-dry").addEventListener("click", () => guarded(async () => {
+  followJob((await api("/api/settings", { body: settingsBody(false) })).id, { onDone: () => loadSettingsPanel() });
+}));
+$("#btn-se-go").addEventListener("click", (e) => guarded(async () => {
+  const b = settingsBody(false);
+  const btn = e.currentTarget;
+  busy(btn, true);
+  let review;
+  try { review = await runAndWait("/api/settings", b, "Reading every selected node's settings…"); } finally { busy(btn, false); }
+  const r = review.result;
+  if (!r.results.some((x) => x.status === "would-change") && !r.blocked.length) {
+    toast("Nothing to change: the selected nodes are already set that way (or don't have these switches)");
+    return;
+  }
+  const ok = await confirmDialog("Review: settings changes", settingsLedger(r), "apply", { wide: true, blocked: r.blocked.length > 0 });
+  if (!ok) return;
+  const job = await api("/api/settings", { body: { ...b, execute: true, confirm: "apply", reviewed_job: review.id } });
+  followJob(job.id, { onDone: () => loadSettingsPanel() });
 }));
 
 // ------------------------------------------------------------------ review (dry run -> ledger)

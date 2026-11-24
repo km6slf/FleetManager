@@ -155,6 +155,7 @@ class AppState:
         self.radios: dict[str, dict[str, Any]] = {}   # node -> NodeRadios.to_json()
         self.connector = None   # tests inject a fake; None means real SSH
         self.sysinfo = sysinfo_or_none
+        self.settings: dict[str, Any] = {}
         self.load_topology()
         self.overrides: dict[str, dict[str, Any]] = self._load_overrides()
 
@@ -214,6 +215,7 @@ class AppState:
         self.discovered_at = data.get("discovered_at")
         self.errors = data.get("errors", {})
         self.radios = data.get("radios", {})
+        self.settings = data.get("settings", {})
 
     def set_discovery(self, topo: Topology, infos: dict[str, NodeInfo], errors: dict[str, str],
                       root: str) -> None:
@@ -236,7 +238,8 @@ class AppState:
         self.topo_path.write_text(json.dumps({
             "nodes": sorted(self.topology.nodes), "links": [l.__dict__ for l in self.topology.links],
             "info": self.nodes, "errors": self.errors, "root": self.root,
-            "discovered_at": self.discovered_at, "radios": self.radios}, indent=1))
+            "discovered_at": self.discovered_at, "radios": self.radios,
+            "settings": self.settings}, indent=1))
 
     def radios_stale(self, node: str) -> bool:
         """Radio details read on different firmware than the node runs now."""
@@ -246,6 +249,21 @@ class AppState:
     def set_firmware(self, node: str, version: str) -> None:
         self.nodes.setdefault(node, {})["firmware"] = version
         self.save_topology()
+
+    def set_settings(self, node: str, ns) -> None:
+        """Settings read from a node (its own dialogs' switches and their current values)."""
+        self.settings[node] = ns.to_json()
+        self.save_topology()
+
+    def settings_summary(self, nodes: list[str]) -> dict[str, Any]:
+        from ..jobs.settings import NodeSettings, summarize
+        have = {n: NodeSettings.from_json(self.settings[n]) for n in nodes if n in self.settings}
+        fw = {n: (self.nodes.get(n) or {}).get("firmware", "") for n in have}
+        stale = sorted(n for n, ns in have.items() if fw[n] and ns.firmware and fw[n] != ns.firmware)
+        for n in stale:
+            have.pop(n)
+        return {"rows": summarize(have), "missing": sorted(set(nodes) - set(have) - set(stale)),
+                "stale": stale, "read": sorted(have)}
 
     def set_radios(self, node: str, inv) -> None:
         self.radios[node] = inv.to_json()
@@ -341,6 +359,9 @@ def radio_options(radios: dict[str, dict[str, Any]], nodes: list[str],
                                    if int(c["number"]) in (common or set())]
             options[cls] = per_bw
         modes = {r.mode for r in rs}
+        # Purposes every selected radio on this band supports (None where a node didn't say).
+        sup = [set(r.modes) for r in rs if r.modes is not None]
+        supported = sorted(set.intersection(*sup)) if sup else None
         chans = {(r.channel, r.bandwidth) for r in rs if r.mode in MESH_MODES}
         out.append({
             "band": band, "band_label": band_label(band), "nodes": sorted(b["nodes"]),
@@ -349,7 +370,7 @@ def radio_options(radios: dict[str, dict[str, Any]], nodes: list[str],
                                   for r in known[n].radios if r.band == band), None)
                          for n in sorted(b["nodes"])},
             "without": sorted(set(known) - set(b["nodes"])),
-            "modes": sorted(modes), "bws": bws, "channels": options,
+            "modes": sorted(modes), "supported_modes": supported, "bws": bws, "channels": options,
             "current": ({"channel": next(iter(chans))[0], "width": next(iter(chans))[1]}
                         if len(chans) == 1 else None),
             "current_mode": next(iter(modes)) if len(modes) == 1 else None,
