@@ -25,7 +25,7 @@ from ..credentials import Credential, forget_password, store_password
 from ..discovery import crawl
 from ..firmware import Catalog, FirmwareStore, match_profile, select_channels
 from ..topology import PlanError, plan_rollout
-from .state import AppState, Job, JobBusy
+from .state import AppState, Job, JobBusy, radio_options
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "fm_token"
@@ -65,15 +65,24 @@ class UpgradeReq(PlanReq):
     confirm: str = ""
 
 
-class RadioReq(BaseModel):
-    nodes: list[str]
+class BandChangeReq(BaseModel):
+    band: str
+    mode: str | None = None
     channel: int | None = None
     width: int | None = None
-    mode: str | None = None
     peer: str | None = None
+
+
+class RadioReq(BaseModel):
+    nodes: list[str]
+    changes: list[BandChangeReq]
     revert_after: int = 600
     execute: bool = False
     confirm: str = ""
+
+
+class NodesReq(BaseModel):
+    nodes: list[str]
 
 
 # ---------------------------------------------------------------- app
@@ -301,17 +310,56 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
         return start("upgrade", title, req.execute, body)
 
     # ------------------------------------------------------------ radio
+    @app.post("/api/radios/read")
+    async def radios_read(req: NodesReq):
+        from ..jobs.radio import describe, read_node_radios
+
+        if not req.nodes:
+            raise HTTPException(400, "select at least one node")
+
+        async def body(job: Job):
+            creds = state.creds()
+            connect = state.connect_factory(creds)
+            sem = asyncio.Semaphore(4)
+            ok = 0
+
+            async def one(n):
+                nonlocal ok
+                async with sem:
+                    try:
+                        s = await connect(n)
+                        try:
+                            inv = await read_node_radios(s)
+                        finally:
+                            await s.close()
+                    except Exception as exc:  # noqa: BLE001
+                        job.log(f"{n}: couldn't read radios ({exc})", "error")
+                        return
+                    state.set_radios(n, inv)
+                    ok += 1
+                    job.log(f"{n}: {describe(inv)}", "ok")
+
+            job.log(f"Reading radio details from {len(req.nodes)} node(s) over SSH…")
+            await asyncio.gather(*(one(n) for n in req.nodes))
+            state.save_creds(creds)
+            job.log(f"Read {ok} of {len(req.nodes)} node(s)", "ok" if ok == len(req.nodes) else "warn")
+        return start("radios", f"Read radios ({len(req.nodes)} nodes)", False, body)
+
+    @app.post("/api/radio/options")
+    async def radio_opts(req: NodesReq):
+        return radio_options(state.radios, req.nodes)
+
     @app.post("/api/radio")
     async def radio(req: RadioReq):
-        from ..jobs.radio import (RadioChange, RadioConfig, cluster_warnings, rf_clusters,
-                                  run_radio_change)
+        from ..jobs.radio import (BandChange, RadioConfig, cluster_warnings, rf_clusters,
+                                  run_radio_change, validate_changes)
         from ..jobs.upgrade import AuditLog
 
         if req.execute and req.confirm.strip().lower() != "switch":
             raise HTTPException(400, "type 'switch' to confirm")
-        change = RadioChange(req.channel, req.width, req.mode, req.peer)
+        changes = [BandChange(c.band, c.mode, c.channel, c.width, c.peer) for c in req.changes]
         try:
-            change.validate()
+            validate_changes(changes)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         selected = set(req.nodes)
@@ -328,16 +376,18 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                     break
                 job.log(f"RF cluster {i}: {', '.join(c)}")
                 rep = await run_radio_change(
-                    c, change, state.connect_factory(creds),
-                    state.sysinfo, RadioConfig(revert_after=req.revert_after),
-                    execute=req.execute, log=log)
+                    c, changes, state.connect_factory(creds), state.sysinfo,
+                    RadioConfig(revert_after=req.revert_after), execute=req.execute, log=log,
+                    on_inventory=state.set_radios)
                 for r in rep.results.values():
-                    job.log(f"{r.node}: {r.status} {r.before} {r.detail}",
-                            "error" if r.status == "failed" else "info")
+                    lvl = {"failed": "error", "confirmed": "ok", "unchanged": "info"}.get(r.status, "info")
+                    job.log(f"{r.node}: {r.status} — {r.detail or r.before}", lvl)
                 if rep.confirmed:
                     job.log(f"cluster {i} confirmed on the new settings", "ok")
+                elif rep.reason in ("dry run", "nothing to change on these nodes"):
+                    job.log(rep.reason, "info")
                 else:
-                    job.log(rep.reason, "warn" if rep.reason == "dry run" else "error")
+                    job.log(rep.reason, "error")
                     if req.execute:
                         job.status = "failed"
                         break

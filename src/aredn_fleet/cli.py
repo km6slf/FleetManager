@@ -175,15 +175,15 @@ def cmd_upgrade(args) -> int:
 # ---------------------------------------------------------------- radio
 
 def cmd_radio(args) -> int:
-    from .jobs.radio import (RadioChange, RadioConfig, cluster_warnings, rf_clusters,
-                             run_radio_change)
+    from .jobs.radio import (BandChange, RadioConfig, cluster_warnings, rf_clusters,
+                             run_radio_change, validate_changes)
     from .jobs.upgrade import AuditLog
     from .transport import connect
 
     topo = _load_snapshot(Path(args.snapshot))
     selected = set(args.nodes or topo.nodes)
-    change = RadioChange(args.channel, args.width, args.mode, args.peer)
-    change.validate()
+    change = BandChange(args.band, args.mode, args.channel, args.width, args.peer)
+    validate_changes([change])
     for w in cluster_warnings(topo, selected):
         print("WARNING:", w)
     clusters = [sorted(c & selected) for c in rf_clusters(topo, selected)]
@@ -207,7 +207,7 @@ def cmd_radio(args) -> int:
     log = AuditLog(Path(args.audit) if args.audit else None)
     rc = 0
     for c in clusters:
-        rep = asyncio.run(run_radio_change(c, change, lambda n: connect(n, creds), sysinfo, cfg,
+        rep = asyncio.run(run_radio_change(c, [change], lambda n: connect(n, creds), sysinfo, cfg,
                                            execute=args.execute, log=log))
         for r in rep.results.values():
             print(f"[{r.status:12}] {r.node:24} {r.before:34} {r.detail}")
@@ -290,9 +290,10 @@ def main(argv: list[str] | None = None) -> int:
                         "auto-revert (dry run unless --execute)")
     ra.add_argument("snapshot")
     ra.add_argument("--nodes", nargs="*", help="selected nodes (default: all)")
+    ra.add_argument("--band", required=True, help="which radio: 5GHz, 2.4GHz, 900MHz, 3GHz")
     ra.add_argument("--channel", type=int)
     ra.add_argument("--width", type=int, help="channel width in MHz (5, 10, 20, ...)")
-    ra.add_argument("--mode", choices=["mesh", "meshap", "meshptp", "meshsta"])
+    ra.add_argument("--mode", choices=["mesh", "meshap", "meshptp", "meshsta", "off"])
     ra.add_argument("--peer", help="peer MAC for meshptp")
     ra.add_argument("--lead", type=float, default=90, help="seconds from arming to the switch")
     ra.add_argument("--revert-after", type=int, default=600,

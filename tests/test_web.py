@@ -72,10 +72,53 @@ def test_upgrade_needs_downloaded_version(client):
 
 
 def test_radio_validation(client):
-    r = client.post("/api/radio", json={"nodes": ["far1"], "mode": "meshptp"})
+    r = client.post("/api/radio", json={"nodes": ["far1"],
+                                        "changes": [{"band": "5GHz", "mode": "meshptp"}]})
     assert r.status_code == 400 and "peer" in r.json()["detail"]
-    r = client.post("/api/radio", json={"nodes": ["far1"], "channel": 133, "execute": True})
+    r = client.post("/api/radio", json={"nodes": ["far1"], "changes": [{"band": "5GHz", "channel": 133}],
+                                        "execute": True})
     assert r.status_code == 400 and "switch" in r.json()["detail"]
+
+
+def _radio(band, mode, channel, bw, table, bws, oob=()):
+    return {"iface": "wlan0", "mode": {"mode": mode, "channel": channel, "bandwidth": bw},
+            "def": {"band": band}, "bws": bws, "channels": table, "managedOOB": list(oob)}
+
+
+def _c(n, f):
+    return {"number": n, "label": f"{n} ({f})", "frequency": f}
+
+
+def test_radio_options_intersect_per_band(client):
+    from aredn_fleet.jobs.radio import parse_radio_inventory
+    st = client.state
+    five_a = {"10": [_c(131, 5655), _c(133, 5665), _c(177, 5885)], "20": [_c(131, 5655)]}
+    five_b = {"10": [_c(133, 5665), _c(177, 5885)], "5": [_c(133, 5665)]}
+    halow = {"1": [_c(1, 903), _c(3, 905)], "2": [_c(2, 904)]}
+    three = {"10": [_c(76, 3380), _c(84, 3420)]}
+    st.set_radios("far1", parse_radio_inventory(json.dumps({"config": [
+        _radio("5GHz", "mesh", 131, 10, five_a, [10, 20], oob=[177]),
+        _radio("900MHz", "mesh", 1, 1, halow, [1, 2])]}), "single-mesh"))
+    st.set_radios("far2", parse_radio_inventory(json.dumps({"config": [
+        _radio("5GHz", "mesh", 133, 10, five_b, [5, 10])]}), "single-mesh"))
+    st.set_radios("relay", parse_radio_inventory(json.dumps({"config": [
+        _radio("3GHz", "mesh", 76, 10, three, [10])]}), "single-mesh"))
+
+    o = client.post("/api/radio/options", json={"nodes": ["far1", "far2", "relay", "hub"]}).json()
+    assert o["missing"] == ["hub"]
+    bands = {b["band"]: b for b in o["bands"]}
+    assert [b["band_label"] for b in o["bands"]] == ["900 MHz", "3.4 GHz", "5 GHz"]  # low to high
+    five = bands["5GHz"]
+    assert five["nodes"] == ["far1", "far2"] and five["bws"] == [10]
+    assert [c["number"] for c in five["channels"]["mesh"]["10"]] == [133, 177]
+    assert [c["number"] for c in five["channels"]["managed"]["10"]] == [133]   # far1 hides 177
+    assert five["per_node"]["far1"]["label"] == "131 (5655)"
+    assert bands["900MHz"]["nodes"] == ["far1"] and bands["900MHz"]["bws"] == [1, 2]
+
+    topo = client.get("/api/topology").json()
+    far1 = next(n for n in topo["nodes"] if n["name"] == "far1")
+    assert [(r["band_label"], r["mode_label"], r["label"]) for r in far1["radios"]] == [
+        ("900 MHz", "Mesh", "1 (903)"), ("5 GHz", "Mesh", "131 (5655)")]   # low to high
 
 
 def test_credentials_key_roundtrip(client, tmp_path):

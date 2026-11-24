@@ -1,45 +1,46 @@
-"""Radio settings job: mesh channel, channel width and mode, with an on-node dead-man revert.
+"""Radio settings job: per-radio (per-band) mode, channel and width, with an on-node dead-man revert.
 
-Read on a 4.26.1.0 node:
+What AREDN 4.26 does (read from a bench node running 4.26.1.0):
 
-* Radio settings live in ``/etc/config.mesh/setup`` (uci ``setup.globals``) as
-  ``radioN_mode`` (``mesh`` | ``meshap`` (PtMP AP) | ``meshptp`` | ``meshsta``
-  | ``lan`` | ``wan`` | ``off``), ``radioN_channel``, ``radioN_bandwidth``
-  and ``radioN_peer`` (meshptp).
-* The web UI changes them through the ucode module ``aredn.configuration``:
-  ``prepareChanges()`` -> ``setSetting(k, v)`` -> ``saveSettings()`` ->
-  ``commitChanges()``. The last step runs ``node-setup`` and
-  ``restart-services`` and flags ``/tmp/reboot-required`` if a reboot is
-  needed. The job uses the same path so the node does exactly what the UI does.
-* ``node-setup`` builds the mesh SSID from the width (``AREDN-20-v3``), and
-  for PtMP/PtP also from the channel. Nodes on different widths can't link at all.
+* Each radio is ``radioN`` in ``/etc/config.mesh/setup`` (uci ``setup.globals``):
+  ``radioN_mode`` (``mesh`` | ``meshap`` (PtMP) | ``meshptp`` | ``meshsta``
+  (Mesh Station) | ``lan`` | ``wan`` | ``off``), ``radioN_channel``,
+  ``radioN_bandwidth``, ``radioN_ssid``, ``radioN_peer``.
+* ``aredn.radios.getConfiguration()`` lists every radio: ``iface``, current
+  ``mode``, ``def.band`` ("2.4GHz", "5GHz", ...), supported widths (``bws``),
+  a channel table per width (``{number, label, frequency}``) and
+  ``managedOOB``. It also returns the WAN-client SSID and key (hex); the
+  manager drops those on read and never stores them.
+* The node's Radios & Antennas dialog builds its channel dropdown from
+  ``channels[width]`` using each entry's ``label``, and in Mesh PtMP, Mesh PtP
+  and Mesh Station modes it hides channels listed in ``managedOOB``.
+  ``channel_options()`` reproduces that exactly, so the fleet manager offers
+  the same choices the node's own screen does.
+* When a radio's mode changes, the dialog also resets its channel, width and
+  SSID (``AREDN`` for mesh modes). On this firmware two radios may not both be
+  in a mesh mode (the dialog turns the other one off); the release candidate
+  lifts that, so it's probed per node.
+* ``aredn.configuration`` ``prepareChanges/setSetting/saveSettings/
+  commitChanges`` applies settings exactly as the dialog does. On 4.26.1.0 any
+  wireless change needs a reboot (``node-setup``'s ``wireless`` case falls
+  through to ``default``).
 
-Every radio change cuts the RF links to neighbours still on the old settings,
-so nodes in an RF cluster are switched **together at one scheduled time**, and
-each node carries its own revert timer:
-
-1. preflight (read-only): read the radio state and the hardware channel table,
-   check the requested channel exists at that width, and check the node clock
-   against the controller.
-2. arm: upload a shell script that backs up ``setup`` to flash, installs a
-   revert timer that survives the reboot AREDN needs for wireless changes,
-   sleeps until the apply time, then applies via ``aredn.configuration`` and
-   reboots. Unless confirmed within ``revert_after`` seconds of booting, the
-   node restores the backup and reboots again.
-3. verify: after the apply time, poll every node's sysinfo until ``meshrf``
-   shows the new channel and width.
-4. confirm only if **every** node in the cluster verified. Otherwise confirm
-   nobody, and the whole cluster reverts together instead of splitting.
+Every change cuts RF links to neighbours still on the old settings, so all
+nodes in an RF cluster switch **together at one scheduled time**, and each one
+carries a revert timer that survives the reboot. The controller confirms only
+if every node in the cluster is back on the new settings with its RF
+neighbours. Otherwise nobody is confirmed, and the whole cluster reverts.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shlex
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -47,13 +48,23 @@ from ..topology import Topology
 from ..transport import NodeSession
 
 MESH_MODES = {"mesh", "meshap", "meshptp", "meshsta"}
+MANAGED_MODES = {"meshap", "meshptp", "meshsta"}   # the dialog applies managedOOB to these
+SETTABLE_MODES = MESH_MODES | {"off"}
+MODE_LABELS = {"mesh": "Mesh", "meshap": "Mesh PtMP", "meshptp": "Mesh PtP",
+               "meshsta": "Mesh Station", "lan": "LAN Hotspot", "wan": "WAN Client", "off": "Off"}
+PERSIST_DIR = "/etc/aredn-fleet-radio"   # on flash: must survive the reboot
 REMOTE_SCRIPT = "/tmp/aredn-fleet-radio.sh"
+RC_LOCAL_LINE = f"[ -x {PERSIST_DIR}/boot-check ] && {PERSIST_DIR}/boot-check &"
 
 RADIO_STATE_CMD = (
     "ucode -e 'import * as r from \"aredn.radios\"; "
-    "printf(\"%J\", { config: r.getConfiguration(), common: r.getCommonConfiguration() });'"
+    "printf(\"%J\", { config: r.getConfiguration() });'"
 )
-
+# The dialog code that forbids two mesh radios, present on firmware that can't do it.
+CAPS_CMD = ("f=/app/main/status/e/radio-and-antenna.ut; "
+            "if [ ! -f $f ]; then echo unknown; "
+            "elif grep -q 'substr(radio0_mode, 0, 4) === substr(radio1_mode, 0, 4)' $f; "
+            "then echo single-mesh; else echo multi-mesh; fi")
 # The revert timer is restarted from /etc/rc.local, which OpenWrt runs from /etc/init.d/done.
 BOOT_HOOK_CHECK = ("[ -f /etc/rc.local ] && ls /etc/rc.d/ 2>/dev/null | grep -q 'done$' "
                    "&& grep -q rc.local /etc/init.d/done && echo ok")
@@ -62,22 +73,213 @@ Connector = Callable[[str], Awaitable[NodeSession]]
 SysinfoFetch = Callable[[str], Awaitable[dict[str, Any] | None]]
 
 
+# --------------------------------------------------------------------------- inventory
+
+def band_label(band: str) -> str:
+    """"5GHz" -> "5 GHz", "900MHz" -> "900 MHz", "3GHz" -> "3.4 GHz" (the ham 3 GHz allocation)."""
+    m = re.fullmatch(r"([\d.]+)\s*(GHz|MHz)", band or "", re.I)
+    if not m:
+        return band or "unknown band"
+    num, unit = m.group(1), "GHz" if m.group(2).lower() == "ghz" else "MHz"
+    if unit == "GHz" and num == "3":
+        num = "3.4"
+    return f"{num} {unit}"
+
+
+def band_of(radio: dict[str, Any]) -> str:
+    """The radio's band as the node reports it ("2.4GHz", "5GHz", "900MHz", ...), else from frequency."""
+    b = str(((radio.get("def") or {}).get("band") or "")).replace(" ", "")
+    if b:
+        return b
+    for chans in (radio.get("channels") or {}).values():
+        for c in chans:
+            f = c.get("frequency") if isinstance(c, dict) else None
+            if f:
+                return ("900MHz" if f < 1000 else "2.4GHz" if f < 2500
+                        else "3.4GHz" if f < 4000 else "5GHz" if f < 5925 else "6GHz")
+    return "unknown"
+
+
+@dataclass
+class RadioInfo:
+    index: int
+    iface: str
+    band: str
+    mode: str
+    channel: int | None
+    bandwidth: int | None
+    bws: list[int]
+    channels: dict[str, list[dict[str, Any]]]   # width -> [{number, label, frequency}]
+    managed_oob: list[int] = field(default_factory=list)
+
+    def channel_options(self, mode: str, bw: int | str) -> list[dict[str, Any]]:
+        """Exactly the options the node's own Channel dropdown shows for this mode and width."""
+        opts = self.channels.get(str(bw), [])
+        if mode in MANAGED_MODES and self.managed_oob:
+            opts = [c for c in opts if int(c["number"]) not in self.managed_oob]
+        return opts
+
+    def frequency(self, ch: int, bw: int | str) -> int | None:
+        for c in self.channels.get(str(bw), []):
+            if int(c["number"]) == int(ch):
+                return int(c.get("frequency") or 0) or None
+        return None
+
+    def label(self, ch: int | None, bw: int | str | None) -> str:
+        for c in self.channels.get(str(bw), []):
+            if ch is not None and int(c["number"]) == int(ch):
+                return str(c["label"])
+        return str(ch)
+
+
+@dataclass
+class NodeRadios:
+    radios: list[RadioInfo]
+    multi_mesh: bool | None          # None = couldn't tell
+    read_at: float = field(default_factory=time.time)
+
+    def by_band(self, band: str) -> RadioInfo | None:
+        return next((r for r in self.radios if r.band == band), None)
+
+    def to_json(self) -> dict[str, Any]:
+        return {"radios": [asdict(r) for r in self.radios], "multi_mesh": self.multi_mesh,
+                "read_at": self.read_at}
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> "NodeRadios":
+        return cls([RadioInfo(**r) for r in d.get("radios", [])], d.get("multi_mesh"),
+                   d.get("read_at", 0))
+
+
+def _int_or_none(v: Any) -> int | None:
+    try:
+        return int(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_radio_inventory(raw: str, caps: str = "unknown") -> NodeRadios:
+    """Parse RADIO_STATE_CMD output. SSIDs and keys are deliberately dropped."""
+    data = json.loads(raw)
+    radios = []
+    for i, r in enumerate(data.get("config") or []):
+        if not isinstance(r, dict):
+            continue
+        m = r.get("mode") or {}
+        chans = {str(bw): [{"number": int(c["number"]), "label": str(c.get("label", c["number"])),
+                            "frequency": int(c.get("frequency") or 0)}
+                           for c in lst if isinstance(c, dict)]
+                 for bw, lst in (r.get("channels") or {}).items()}
+        oob = r.get("managedOOB") or []
+        radios.append(RadioInfo(
+            index=i, iface=str(r.get("iface") or f"wlan{i}"), band=band_of(r),
+            mode=str(m.get("mode") or "off"),
+            channel=_int_or_none(m.get("channel")), bandwidth=_int_or_none(m.get("bandwidth")),
+            bws=[int(b) for b in (r.get("bws") or [])], channels=chans,
+            managed_oob=[int(x) for x in oob if _int_or_none(x) is not None]))
+    multi = {"multi-mesh": True, "single-mesh": False}.get(caps.strip())
+    return NodeRadios(radios, multi)
+
+
+async def read_node_radios(session: NodeSession) -> NodeRadios:
+    raw = (await session.run(RADIO_STATE_CMD)).stdout
+    caps = (await session.run(CAPS_CMD)).stdout
+    return parse_radio_inventory(raw, caps)
+
+
+# --------------------------------------------------------------------------- requested change
+
 @dataclass(frozen=True)
-class RadioChange:
+class BandChange:
+    band: str                       # "5GHz", "2.4GHz", ...
+    mode: str | None = None         # None = leave as is
     channel: int | None = None
-    bandwidth: int | None = None
-    mode: str | None = None
-    peer: str | None = None  # required for meshptp
+    width: int | None = None
+    peer: str | None = None         # required for meshptp
 
     def validate(self) -> None:
-        if self.mode is not None and self.mode not in MESH_MODES:
-            raise ValueError(f"mode must be one of {sorted(MESH_MODES)}")
+        if self.mode is not None and self.mode not in SETTABLE_MODES:
+            raise ValueError(f"{self.band}: mode must be one of {sorted(SETTABLE_MODES)}")
         if self.mode == "meshptp" and not self.peer:
-            raise ValueError("meshptp needs --peer (the other end's MAC address)")
-        if self.peer and not all(c in "0123456789abcdefABCDEF:" for c in self.peer):
-            raise ValueError("peer must be a MAC address")
-        if self.channel is None and self.bandwidth is None and self.mode is None:
-            raise ValueError("nothing to change")
+            raise ValueError(f"{self.band}: Mesh PtP needs the peer's MAC address")
+        if self.peer and not re.fullmatch(r"[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}", self.peer):
+            raise ValueError(f"{self.band}: peer must be a MAC address like aa:bb:cc:dd:ee:ff")
+        if self.mode is None and self.channel is None and self.width is None:
+            raise ValueError(f"{self.band}: nothing to change")
+
+
+def validate_changes(changes: list[BandChange]) -> None:
+    if not changes:
+        raise ValueError("nothing to change")
+    bands = [c.band for c in changes]
+    if len(set(bands)) != len(bands):
+        raise ValueError("one change per band")
+    for c in changes:
+        c.validate()
+
+
+@dataclass
+class NodePlan:
+    """What will be written on one node, after checking it against that node's radios."""
+    sets: list[tuple[int, str, str]] = field(default_factory=list)   # (radio index, key, value)
+    expect: list[dict[str, Any]] = field(default_factory=list)        # live checks after switch
+    notes: list[str] = field(default_factory=list)
+
+
+def plan_node(inv: NodeRadios, changes: list[BandChange]) -> NodePlan:
+    """Turn band changes into radioN_* settings for this node, or raise ValueError."""
+    plan = NodePlan()
+    final_modes = {r.index: r.mode for r in inv.radios}
+    for ch in changes:
+        same = [x for x in inv.radios if x.band == ch.band]
+        if len(same) > 1:
+            raise ValueError(f"this node has {len(same)} radios on {band_label(ch.band)}; "
+                             "the fleet manager can't tell which one to change yet")
+        r = inv.by_band(ch.band)
+        if r is None:
+            plan.notes.append(f"no {band_label(ch.band)} radio; skipped")
+            continue
+        mode = ch.mode or r.mode
+        if mode not in MESH_MODES and mode != "off":
+            raise ValueError(f"{ch.band} radio is a {MODE_LABELS.get(mode, mode)}; the fleet "
+                             f"manager only changes mesh radios (or turns them off)")
+        mode_changed = ch.mode is not None and ch.mode != r.mode
+        width = ch.width if ch.width is not None else r.bandwidth
+        channel = ch.channel if ch.channel is not None else r.channel
+        before = len(plan.sets)
+        if mode in MESH_MODES:
+            if width is None or width not in r.bws:
+                raise ValueError(f"{ch.band}: {width} MHz isn't offered on this radio "
+                                 f"({', '.join(map(str, r.bws))} MHz)")
+            allowed = [int(c["number"]) for c in r.channel_options(mode, width)]
+            if channel not in allowed:
+                raise ValueError(f"{ch.band}: channel {channel} isn't offered at {width} MHz in "
+                                 f"{MODE_LABELS[mode]} mode on this radio")
+            if mode_changed:
+                plan.sets.append((r.index, "mode", mode))
+                if r.mode not in MESH_MODES:
+                    # As the dialog does: a radio entering a mesh mode gets the mesh SSID
+                    # (otherwise a former WAN client's network name would leak into it).
+                    plan.sets.append((r.index, "ssid", "AREDN"))
+            if mode_changed or channel != r.channel:
+                plan.sets.append((r.index, "channel", str(int(channel))))
+            if mode_changed or width != r.bandwidth:
+                plan.sets.append((r.index, "bandwidth", str(int(width))))
+            if mode == "meshptp" and ch.peer:
+                plan.sets.append((r.index, "peer", ch.peer.lower()))
+            if len(plan.sets) > before:
+                plan.expect.append({"iface": r.iface, "band": ch.band, "mode": mode,
+                                    "frequency": r.frequency(channel, width), "width": width})
+        elif mode == "off" and mode_changed:
+            plan.sets.append((r.index, "mode", "off"))
+            plan.expect.append({"iface": r.iface, "band": ch.band, "mode": "off"})
+        final_modes[r.index] = mode
+        if len(plan.sets) == before:
+            plan.notes.append(f"{ch.band} already set that way")
+    if sum(1 for m in final_modes.values() if m in MESH_MODES) > 1 and inv.multi_mesh is not True:
+        raise ValueError("this firmware can't run mesh on two radios at once "
+                         "(AREDN's release candidate / nightly can)")
+    return plan
 
 
 # --------------------------------------------------------------------------- clusters
@@ -111,90 +313,30 @@ def cluster_warnings(topo: Topology, selected: set[str]) -> list[str]:
     for comp in rf_clusters(topo, selected):
         left_out = comp - selected
         if left_out:
-            warns.append(
-                f"RF neighbours not selected will lose their links to the changed nodes: "
-                f"{', '.join(sorted(left_out))}")
+            warns.append("RF neighbours not selected will lose their links to the changed nodes: "
+                          + ", ".join(sorted(left_out)))
     return warns
-
-
-# --------------------------------------------------------------------------- node state
-
-@dataclass
-class RadioState:
-    radio_index: int          # which radioN carries the mesh
-    mode: str
-    channel: int | None
-    bandwidth: int | None
-    channels_by_bw: dict[str, list[int]] = field(default_factory=dict)
-
-
-def parse_radio_state(raw: str) -> RadioState:
-    """Parse the JSON printed by RADIO_STATE_CMD.
-
-    Shape seen on 4.26.1.0: ``config`` is a list of radios, each with
-    ``iface``, ``mode: {mode, channel, bandwidth, ...}``, ``bws`` and
-    ``channels: {"<bw>": [{number, label, frequency}, ...]}``. ``common``
-    has the same per-radio channel tables with ``mode: null``.
-    """
-    data = json.loads(raw)
-    config = data.get("config") or []
-    common = data.get("common") or []
-    for i, r in enumerate(config):
-        m = (r or {}).get("mode") or {}
-        if m.get("mode") in MESH_MODES:
-            src = r.get("channels") or (common[i].get("channels") if i < len(common)
-                                        and isinstance(common[i], dict) else None) or {}
-            table = {str(bw): [int(c["number"]) if isinstance(c, dict) else int(c) for c in chans]
-                     for bw, chans in src.items()}
-            return RadioState(i, m["mode"], m.get("channel"), m.get("bandwidth"), table)
-    raise ValueError("no radio is in a mesh mode")
-
-
-def check_change(state: RadioState, change: RadioChange) -> str | None:
-    """Return a reason the change is impossible on this hardware, or None."""
-    bw = change.bandwidth if change.bandwidth is not None else state.bandwidth
-    ch = change.channel if change.channel is not None else state.channel
-    if state.channels_by_bw:
-        if str(bw) not in state.channels_by_bw:
-            return f"width {bw} MHz not supported (have {', '.join(sorted(state.channels_by_bw, key=int))})"
-        if ch not in state.channels_by_bw[str(bw)]:
-            return f"channel {ch} not available at {bw} MHz on this radio"
-    return None
 
 
 # --------------------------------------------------------------------------- on-node script
 
-PERSIST_DIR = "/etc/aredn-fleet-radio"   # on flash: must survive the reboot
-RC_LOCAL_LINE = f"[ -x {PERSIST_DIR}/boot-check ] && {PERSIST_DIR}/boot-check &"
-
-
-def build_apply_script(radio: int, change: RadioChange, apply_at: int, revert_after: int) -> str:
+def build_apply_script(sets: list[tuple[int, str, str]], apply_at: int, revert_after: int) -> str:
     """Shell script run on the node.
 
-    On 4.26.1.0, ``node-setup`` marks *any* wireless change as reboot-required
-    (its ``wireless`` case falls through to ``default``), so ``commitChanges``
-    leaves the new settings pending until a reboot. That reboot wipes /tmp, so
-    the revert timer lives on flash in ``/etc/aredn-fleet-radio`` and is
-    restarted from ``/etc/rc.local`` (in the sysupgrade keep list) at boot. The
-    timer counts from boot, not wall-clock time, so it doesn't depend on NTP
-    being up yet.
+    On 4.26.1.0 any wireless change needs a reboot, which wipes /tmp, so the
+    revert timer lives on flash in ``/etc/aredn-fleet-radio`` and is restarted
+    from ``/etc/rc.local`` (in the sysupgrade keep list) at boot. It counts from
+    boot, not wall-clock time, so it doesn't depend on NTP being up yet.
     """
-    sets = []
-    if change.mode is not None:
-        sets.append(("mode", change.mode))
-    if change.channel is not None:
-        sets.append(("channel", str(int(change.channel))))
-    if change.bandwidth is not None:
-        sets.append(("bandwidth", str(int(change.bandwidth))))
-    if change.peer:
-        sets.append(("peer", change.peer.lower()))
-    # Values are validated (ints, whitelisted modes, hex MAC), so plain quoting is safe.
-    ucode_sets = " ".join(f'c.setSetting("radio{radio}_{k}", "{v}");' for k, v in sets)
+    for _, k, v in sets:  # values are whitelisted or numeric; keep it that way
+        if not re.fullmatch(r"[A-Za-z0-9:._-]+", v) or not re.fullmatch(r"[a-z_]+", k):
+            raise ValueError(f"refusing unsafe setting {k}={v!r}")
+    ucode_sets = " ".join(f'c.setSetting("radio{i}_{k}", "{v}");' for i, k, v in sets)
     ucode = ("import * as c from \"aredn.configuration\"; c.prepareChanges(); "
              f"{ucode_sets} c.saveSettings(); c.commitChanges();")
     P = PERSIST_DIR
     return f"""#!/bin/sh
-# Generated by aredn-fleet. Applies a radio change at a set time; reverts it
+# Generated by aredn-fleet. Applies radio settings at a set time; reverts them
 # automatically unless the controller confirms within {revert_after}s, even
 # across the reboot the change needs.
 P={P}
@@ -253,20 +395,59 @@ def cleanup_command() -> str:
     return f"rm -rf {PERSIST_DIR}; sed -i '/aredn-fleet-radio/d' /etc/rc.local"
 
 
+# --------------------------------------------------------------------------- live checks
+
+IW_TYPE = {"mesh": "IBSS", "meshap": "AP", "meshsta": "managed"}
+
+
+def iw_state(output: str) -> dict[str, Any]:
+    s: dict[str, Any] = {}
+    if m := re.search(r"type (\S+)", output):
+        s["type"] = m.group(1)
+    if m := re.search(r"\((\d+) MHz\)", output):
+        s["frequency"] = int(m.group(1))
+    if m := re.search(r"width: (\d+) MHz", output):
+        s["width"] = int(m.group(1))
+    return s
+
+
+def expectation_met(exp: dict[str, Any], iw_out: str) -> bool:
+    s = iw_state(iw_out)
+    if exp["mode"] == "off":
+        return "type" not in s                       # interface gone
+    if exp.get("frequency") and s.get("frequency") != exp["frequency"]:
+        return False
+    want = IW_TYPE.get(exp["mode"])
+    if want and s.get("type") != want:
+        return False
+    # 5/10 MHz are a driver setting that iw may report as 20 MHz; only check >= 20.
+    if exp.get("width", 0) >= 20 and s.get("width") not in (None, exp["width"]):
+        return False
+    return True
+
+
+def rf_neighbours(si: dict[str, Any] | None) -> set[str]:
+    out = set()
+    for e in ((si or {}).get("link_info") or {}).values():
+        if e.get("hostname") and str(e.get("linkType", "")).upper() == "RF":
+            out.add(e["hostname"].lower().removesuffix(".local.mesh"))
+    return out
+
+
 # --------------------------------------------------------------------------- job
 
 @dataclass
 class RadioConfig:
     lead_seconds: float = 90        # time from arming the last node to the switch
     revert_after: int = 600         # node reverts unless confirmed within this
-    poll_interval: float = 10
+    poll_interval: float = 15
     max_clock_skew: float = 20
 
 
 @dataclass
 class RadioNodeResult:
     node: str
-    status: str = "pending"   # would-change, armed, verified, confirmed, failed, unchanged
+    status: str = "pending"   # would-change, unchanged, armed, verified, confirmed, failed
     detail: str = ""
     before: str = ""
 
@@ -278,22 +459,30 @@ class RadioReport:
     reason: str = ""
 
 
-def _meshrf(si: dict[str, Any] | None) -> tuple[Any, Any]:
-    m = (si or {}).get("meshrf") or {}
-    return m.get("channel"), m.get("chanbw")
+def describe(inv: NodeRadios) -> str:
+    parts = []
+    for r in inv.radios:
+        if r.mode in MESH_MODES:
+            parts.append(f"{band_label(r.band)} {MODE_LABELS[r.mode]} ch "
+                         f"{r.label(r.channel, r.bandwidth)} @ {r.bandwidth} MHz")
+        else:
+            parts.append(f"{band_label(r.band)} {MODE_LABELS.get(r.mode, r.mode)}")
+    return "; ".join(parts)
 
 
-async def run_radio_change(cluster: list[str], change: RadioChange, connect: Connector,
+async def run_radio_change(cluster: list[str], changes: list[BandChange], connect: Connector,
                            sysinfo: SysinfoFetch, cfg: RadioConfig | None = None,
                            execute: bool = False,
                            sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                            now: Callable[[], float] = time.time,
-                           log: Callable[..., None] = lambda *a, **k: None) -> RadioReport:
+                           log: Callable[..., None] = lambda *a, **k: None,
+                           on_inventory: Callable[[str, NodeRadios], None] | None = None
+                           ) -> RadioReport:
     """Change one RF cluster together. Dry run (default) does only the read-only preflight."""
     cfg = cfg or RadioConfig()
-    change.validate()
+    validate_changes(changes)
     results = {n: RadioNodeResult(n) for n in cluster}
-    states: dict[str, RadioState] = {}
+    plans: dict[str, NodePlan] = {}
 
     # ---- preflight (read-only)
     for n in cluster:
@@ -301,7 +490,7 @@ async def run_radio_change(cluster: list[str], change: RadioChange, connect: Con
         try:
             s = await connect(n)
             try:
-                st = parse_radio_state((await s.run(RADIO_STATE_CMD)).stdout)
+                inv = await read_node_radios(s)
                 node_time = float((await s.run("date +%s")).stdout.strip() or 0)
                 hook = (await s.run(BOOT_HOOK_CHECK)).stdout.strip()
             finally:
@@ -309,32 +498,48 @@ async def run_radio_change(cluster: list[str], change: RadioChange, connect: Con
         except Exception as exc:  # noqa: BLE001
             r.status, r.detail = "failed", f"preflight: {exc}"
             continue
-        r.before = f"radio{st.radio_index} {st.mode} ch {st.channel} @ {st.bandwidth} MHz"
+        if on_inventory:
+            on_inventory(n, inv)
+        r.before = describe(inv)
+        try:
+            plan = plan_node(inv, changes)
+        except ValueError as exc:
+            r.status, r.detail = "failed", str(exc)
+            continue
+        if not plan.sets:
+            r.status, r.detail = "unchanged", "; ".join(plan.notes) or "nothing to change"
+            continue
         if abs(node_time - now()) > cfg.max_clock_skew:
             r.status, r.detail = "failed", f"clock off by {node_time - now():+.0f}s; fix NTP first"
             continue
         if hook != "ok":
-            r.status, r.detail = "failed", "node doesn't run /etc/rc.local at boot; revert timer can't survive a reboot"
+            r.status, r.detail = "failed", ("node doesn't run /etc/rc.local at boot; the revert "
+                                            "timer couldn't survive a reboot")
             continue
-        why = check_change(st, change)
-        if why:
-            r.status, r.detail = "failed", why
-            continue
-        states[n] = st
+        plans[n] = plan
         r.status = "would-change"
+        r.detail = ", ".join(f"radio{i}_{k}={v}" for i, k, v in plan.sets)
+        if plan.notes:
+            r.detail += " (" + "; ".join(plan.notes) + ")"
 
     failed = [n for n, r in results.items() if r.status == "failed"]
     if failed:
         return RadioReport(results, False, f"preflight failed on {', '.join(failed)}; nothing changed")
+    if not plans:
+        return RadioReport(results, False, "nothing to change on these nodes")
     if not execute:
         return RadioReport(results, False, "dry run")
 
+    targets = sorted(plans)
+    neighbours_before = {n: rf_neighbours(await sysinfo(n)) & set(cluster) for n in targets}
+
     # ---- arm every node with the same apply time
     apply_at = int(now() + cfg.lead_seconds)
-    log("-", "radio-arm", apply_at=apply_at, change=change.__dict__, nodes=cluster)
+    log("-", "radio-arm", apply_at=apply_at, nodes=targets,
+        changes=[asdict(c) for c in changes])
     armed: list[str] = []
-    for n in cluster:
-        script = build_apply_script(states[n].radio_index, change, apply_at, cfg.revert_after)
+    for n in targets:
+        script = build_apply_script(plans[n].sets, apply_at, cfg.revert_after)
         try:
             s = await connect(n)
             try:
@@ -350,7 +555,7 @@ async def run_radio_change(cluster: list[str], change: RadioChange, connect: Con
         except Exception as exc:  # noqa: BLE001
             results[n].status, results[n].detail = "failed", f"arm: {exc}"
             break
-    if len(armed) != len(cluster):
+    if len(armed) != len(targets):
         for n in armed:  # cancel before the switch time; the scripts exit untouched
             try:
                 s = await connect(n)
@@ -361,18 +566,32 @@ async def run_radio_change(cluster: list[str], change: RadioChange, connect: Con
                 results[n].detail = f"CANCEL FAILED, will switch at {apply_at}: {exc}"
         return RadioReport(results, False, "arming failed; switch cancelled")
 
-    # ---- wait for the switch, then verify every node
-    await sleep(max(0.0, apply_at - now()) + 5)
-    want_ch = change.channel
-    want_bw = change.bandwidth
-    deadline = apply_at + cfg.revert_after - 60  # leave time to confirm before revert
-    pending = set(cluster)
+    # ---- wait for the switch (and reboot), then verify every node live
+    await sleep(max(0.0, apply_at - now()) + 30)
+    deadline = apply_at + cfg.revert_after - 90   # leave time to confirm before revert
+    pending = set(targets)
+    why: dict[str, str] = {}
     while pending and now() < deadline:
         for n in sorted(pending):
-            ch, bw = _meshrf(await sysinfo(n))
-            ok_ch = want_ch is None or ch == want_ch
-            ok_bw = want_bw is None or bw == want_bw
-            if ch is not None and ok_ch and ok_bw:
+            try:
+                s = await connect(n)
+                try:
+                    ok = True
+                    for exp in plans[n].expect:
+                        out = (await s.run(f"iw dev {shlex.quote(exp['iface'])} info 2>&1",
+                                           timeout=15)).stdout
+                        if not expectation_met(exp, out):
+                            ok, why[n] = False, f"{exp['band']} not on the new settings yet"
+                finally:
+                    await s.close()
+            except Exception as exc:  # noqa: BLE001 - still rebooting
+                why[n] = f"not reachable yet ({type(exc).__name__})"
+                continue
+            if ok:
+                missing = neighbours_before[n] - rf_neighbours(await sysinfo(n))
+                if missing:
+                    why[n] = f"RF neighbours not back: {', '.join(sorted(missing))}"
+                    continue
                 pending.discard(n)
                 results[n].status = "verified"
         if pending:
@@ -380,22 +599,21 @@ async def run_radio_change(cluster: list[str], change: RadioChange, connect: Con
 
     if pending:
         for n in pending:
-            results[n].status, results[n].detail = "failed", "not seen on new settings"
+            results[n].status, results[n].detail = "failed", why.get(n, "not verified")
         reason = (f"not verified: {', '.join(sorted(pending))}. Confirming nobody; the whole "
                   f"cluster reverts about {cfg.revert_after}s after the switch.")
         log("-", "radio-no-confirm", reason=reason)
         return RadioReport(results, False, reason)
 
     # ---- confirm everyone
-    for n in cluster:
+    for n in targets:
         try:
             s = await connect(n)
-            # The boot-check timer sees "confirmed" and cleans up; do it now too.
             await s.run(f"touch {PERSIST_DIR}/confirmed; {cleanup_command()}")
             await s.close()
             results[n].status = "confirmed"
         except Exception as exc:  # noqa: BLE001
             results[n].status, results[n].detail = "failed", f"confirm: {exc} (this node will revert)"
-    ok = all(r.status == "confirmed" for r in results.values())
+    ok = all(results[n].status == "confirmed" for n in targets)
     log("-", "radio-done", confirmed=ok)
     return RadioReport(results, ok, "" if ok else "some nodes could not be confirmed and will revert")

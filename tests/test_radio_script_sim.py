@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from aredn_fleet.jobs.radio import RadioChange, build_apply_script
+from aredn_fleet.jobs.radio import build_apply_script
 
 pytestmark = pytest.mark.skipif(os.name == "nt" or shutil.which("sh") is None,
                                 reason="needs a POSIX sh (the script runs on AREDN nodes, not Windows)")
@@ -34,7 +34,7 @@ def setup_sim(root, reboot_needed):
     u.write_text(f"#!/bin/sh\necho ucode >> {root}/log\n"
                  f"echo \"option radio0_channel '133'\" > {root}/etc/config.mesh/setup\n{flag}\n")
     u.chmod(0o755)
-    s = build_apply_script(0, RadioChange(channel=133, bandwidth=10), 0, 1)
+    s = build_apply_script([(0, "channel", "133"), (0, "bandwidth", "10")], 0, 1)
     s = (s.replace("/etc/", f"{root}/etc/")
           .replace("/tmp/reboot-required", f"{root}/tmp/reboot-required")
           .replace("/usr/local/bin/", ""))

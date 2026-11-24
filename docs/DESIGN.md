@@ -87,6 +87,20 @@ The job (`aredn-fleet radio`):
 * **4.26.1.0 detail:** in `node-setup`, the `case "wireless":` branch has no `break`, so it falls through to `default: changes.reboot = true`. As a result, **any wireless change, channel included, needs a reboot**, and `restart-services` exits without reloading anything. The job handles both cases: a reboot, or a plain `restart-services` if a later firmware fixes this.
 * The script's revert, confirm and reboot paths run under a POSIX shell with stubbed AREDN tools in CI (`tests/test_radio_script_sim.py`).
 
+## Radios (per band)
+* **Inventory:** "Read radios" logs in over SSH and runs `aredn.radios.getConfiguration()` on each node. That returns every radio: interface, band, mode, channel, width, supported widths, the channel table per width with the node's own labels, and `managedOOB`. **WAN-client SSIDs and keys are dropped when read and never stored.** Each node is also probed for whether it can mesh on two radios at once.
+* **Bands:** whatever band the node reports, shown as 900 MHz, 2.4 GHz, 3.4 GHz, 5 GHz or 6 GHz. If a node doesn't name a band, it's inferred from frequency (6 GHz from 5925 MHz up). Bands are sorted low to high.
+* **Dropdowns:** built exactly like the node's Radios & Antennas dialog. The list is `channels[width]` with the node's labels, and `managedOOB` channels are hidden in Mesh PtMP, Mesh PtP and Mesh Station modes. For a multi-node selection, each band offers only the widths and channels every selected node with that band supports. Nodes without that band are left alone.
+* **Changes** are per band (`BandChange`) and resolved per node to `radioN_*` settings. A radio switching into a mesh mode gets SSID `AREDN`, as the dialog does. The job refuses to:
+  * change WAN Client or LAN Hotspot radios,
+  * run two mesh radios on firmware that can't,
+  * pick a channel the node's dialog wouldn't offer,
+  * act on a node with two radios on the same band.
+* **Verification** after the switch is live:
+  * `iw dev <iface> info` must show the expected frequency and interface type. Widths of 5 and 10 MHz are driver settings that iw reports as 20, so width is only checked at 20 MHz and up.
+  * Every RF neighbour the node had before must be back.
+* See `docs/NIGHTLY.md` for the release-candidate features: multi-radio mesh, multi-channel stations, internet bypass and more.
+
 ## Field findings — bench node (MikroTik hAP ac lite, AREDN 4.26.1.0)
 * Board name is `mikrotik,routerboard-952ui-5ac2nd` (from `/tmp/sysinfo/board_name`) and the target is `ath79/mikrotik`.
 * RAM is tight: 57.6 MB total, about 20 MB available, and `/tmp` (tmpfs) has 27.8 MB free. That's enough for one ~8 MB image, but the RAM preflight check stays.
@@ -160,7 +174,9 @@ The job (`aredn-fleet radio`):
 * [x] Windows install, discover, `firmware fetch --board`, upgrade dry run against the bench node: all good
 * [ ] First real upgrade on the bench node (4.26.1.0 → 4.26.10.0)
 * [x] Radio settings job (synchronized switch per RF cluster, on-node auto-revert via pushed script; simulated-cluster tests)
+* [x] Per-band radio settings for 1- and 2-radio nodes (900 MHz, 2.4, 3.4, 5, 6 GHz), channel lists identical to the node's own dialog, multi-mesh probe
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)
+* [ ] Nightly: run `tools/recon/recon-nightly.sh`, then multi-channel stations and the bulk settings job (internet bypass/sharing)
 * [ ] Package the revert script as the optional .ipk agent
 * [x] GUI (desktop window + headless serve), token auth, background jobs with stop; API tests; bundle self-test
 * [x] Windows installer + portable zip built in CI

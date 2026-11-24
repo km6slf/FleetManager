@@ -68,15 +68,13 @@
           <div id="plan-out"></div>
         </div>
 
-        <div class="card">
+        <div class="card" id="radio-card">
           <h4>Radio settings</h4>
-          <p class="hint">Each RF cluster switches together and reverts on its own unless confirmed.</p>
+          <p class="hint">Lists match each node's own Radios &amp; Antennas screen, narrowed to what every selected node supports.</p>
+          <div id="radio-missing" class="notice hidden"><span></span> <button id="btn-read-radios" class="ghost">Read radios</button></div>
+          <div id="radio-bands"><p class="hint">Select nodes to see their radios.</p></div>
           <div class="grid2">
-            <label>Channel <input id="ra-channel" type="number" placeholder="unchanged"></label>
-            <label>Width (MHz) <select id="ra-width"><option value="">unchanged</option><option>5</option><option>10</option><option>20</option><option>40</option><option>80</option></select></label>
-            <label>Mode <select id="ra-mode"><option value="">unchanged</option><option value="mesh">Mesh</option><option value="meshap">Mesh PtMP (AP)</option><option value="meshsta">Mesh PtMP (station)</option><option value="meshptp">Mesh PtP</option></select></label>
             <label>Revert after (s) <input id="ra-revert" type="number" min="120" value="600"></label>
-            <label id="ra-peer-wrap" class="hidden">Peer MAC <input id="ra-peer" placeholder="aa:bb:cc:dd:ee:ff"></label>
           </div>
           <div class="row">
             <button id="btn-ra-dry">Dry run</button>
