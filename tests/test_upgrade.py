@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 import sys
 import pytest
 import asyncio
@@ -466,3 +467,29 @@ def test_plan_level_block_and_final_release_message(tmp_path):
     rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, sleep=no_sleep,
                           final_release=lambda board, model: "3.25.5.1"))
     assert "last release is 3.25.5.1" in rep.results[0].detail
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="runs the node's POSIX sh script")
+@pytest.mark.parametrize("pid1, handed_off", [("upgraded", True), ("procd", False)])
+def test_legacy_script_handoff_is_not_undone(tmp_path, pid1, handed_off):
+    """3.23's sysupgrade returns 246 ("Connection failed") when procd execs stage 2. That is
+    success: the script must not clear the flag, restart services or delete the image."""
+    from aredn_fleet.jobs.upgrade import legacy_upgrade_script
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    calls = tmp_path / "calls"
+    for name, body in {"lua": f'echo "lua $*" >> {calls}', "sleep": "true",
+                       "rm": f'echo "rm $*" >> {calls}',
+                       "fake-sysupgrade": "echo 'Command failed: ubus call system sysupgrade (Connection failed)'; exit 246"}.items():
+        (bin_ / name).write_text(f"#!/bin/sh\n{body}\n")
+        (bin_ / name).chmod(0o755)
+    comm = tmp_path / "comm"
+    comm.write_text(pid1 + "\n")
+    script = tmp_path / "s.sh"
+    script.write_text(legacy_upgrade_script(str(bin_ / "fake-sysupgrade")))
+    env = {"PATH": f"{bin_}:/usr/bin:/bin", "FLEET_PID1_COMM": str(comm)}
+    out = subprocess.run(["sh", str(script)], env=env, capture_output=True, text=True).stdout
+    log = calls.read_text()
+    assert ('"nodeupgraded", "0"' in log) is not handed_off
+    assert ("rm " in log) is not handed_off
+    assert ("ERROR" in out) is not handed_off

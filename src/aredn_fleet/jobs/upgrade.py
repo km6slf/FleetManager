@@ -300,9 +300,14 @@ class NodeUpgrade:
                 await s.run(f"rm -f {REMOTE_IMAGE}", timeout=10)
             except Exception:  # noqa: BLE001
                 pass
-            return self._fail(res, f"aredn_sysupgrade failed: {log.strip()[:300]}"
-                                   + (" (babel may be stopped; node may need a reboot)" if stopped
-                                      else " (nothing was flashed; the node is unchanged)"))
+            if legacy and stopped:
+                why = (" (nothing was flashed; the node's services and settings were put back, "
+                       "and its firmware is unchanged)")
+            elif stopped:
+                why = " (babel may be stopped; node may need a reboot)"
+            else:
+                why = " (nothing was flashed; the node is unchanged)"
+            return self._fail(res, f"aredn_sysupgrade failed: {log.strip()[:300]}{why}")
 
         self.log(self.node, "launched", log=log.strip()[-500:])
         if not await self._wait(lambda si: si is None, self.cfg.down_timeout):
@@ -472,7 +477,8 @@ def legacy_upgrade_script(sysupgrade_cmd: str) -> str:
     2. stop the services the node's upgrade_prepare.sh lists, to free RAM, except dropbear so
        this tool can still read the log if something fails before the flash;
     3. aredn_sysupgrade -f <settings archive> -q <image>.
-    If sysupgrade returns, nothing was flashed: undo 1 and 2 and say so.
+    sysupgrade "returns" even when it worked (PID 1 execs the stage-2 upgrader and the ubus
+    call is cut off), so the script only undoes 1 and 2 if PID 1 is still procd afterwards.
     """
     return f"""#!/bin/sh
 lua -e 'require("aredn.info").set_nvram("nodeupgraded", "1")' || {{ echo "ERROR: couldn't set nodeupgraded"; exit 1; }}
@@ -484,7 +490,16 @@ for S in $(sed -n 's/^SERVICES="\(.*\)"$/\1/p' /usr/local/bin/upgrade_prepare.sh
 done
 echo 3 > /proc/sys/vm/drop_caches
 {sysupgrade_cmd} -f {LEGACY_ARCHIVE} -q {REMOTE_IMAGE}
-echo "ERROR: sysupgrade returned $? without flashing"
+rc=$?
+# On this firmware a good hand-off *looks* like a failure: procd (PID 1) execs the stage-2
+# upgrader, which drops sysupgrade's ubus call ("Connection failed", 246). Undoing anything
+# now would delete the image stage 2 is about to flash. Only undo if PID 1 is still procd.
+sleep 3
+if [ "$(cat ${{FLEET_PID1_COMM:-/proc/1/comm}} 2>/dev/null)" != procd ]; then
+  echo "handed to stage 2 (sysupgrade returned $rc); flashing"
+  exit 0
+fi
+echo "ERROR: sysupgrade returned $rc without flashing"
 lua -e 'require("aredn.info").set_nvram("nodeupgraded", "0")'
 /usr/local/bin/upgrade_prepare.sh restore >/dev/null 2>&1
 rm -f {REMOTE_IMAGE} {LEGACY_ARCHIVE}"""
