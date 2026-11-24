@@ -1,3 +1,5 @@
+import sys
+import pytest
 import asyncio
 import gzip
 import hashlib
@@ -358,6 +360,7 @@ def test_launch_that_never_starts_fails_fast_and_cleans_up(tmp_path):
     assert any(c.startswith("rm -f /tmp/aredn-fleet-upgrade.bin") for _, c in mesh.commands)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a POSIX sh")
 def test_detached_runs_under_posix_sh(tmp_path):
     import subprocess
     import time
