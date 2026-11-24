@@ -59,6 +59,16 @@ Safe, bulk updating of AREDN nodes. Inspired by the "Fleet Manager … doesn't e
 6. Soak for an interval (TBD, configurable; default proposal 2–5 min per wave) before the next wave.
 7. On failure, stop the rollout. Do **not** continue inward past a failed node.
 
+### Release-candidate safeguards (from AREDN's RC notes)
+These come from `aredn_fleet/rc.py`. They apply when the target is an RC nightly (20261012 or later) or a stable release after 4.26.10.0.
+* **Config backup before every flash** (all upgrades, not just RC). The node writes `aredn.configuration.backup()` to `/tmp`, the manager downloads it over SSH, and saves it to `config/backups/<node>/<time>-<from-version>.tgz`. If the backup fails, that node isn't upgraded. The backup can include the password hash and Wi-Fi keys, so it stays on this computer.
+* **PtMP access point before its Mesh Stations.** Access point / station pairs come from the radio details (RF neighbours with Mesh PtMP and Mesh Station radios on the same band). The planner uses `must_precede` constraints so an access point is ordered ahead of its stations when both are selected; nodes behind them still go outermost first. This applies to every upgrade, since it's harmless.
+  * For RC targets, a live check before each station: each access point must already run 4.26.7.0 or the RC, or be earlier in the same run. Otherwise the station is BLOCKED and the reason says what to upgrade first.
+  * If a neighbour's radio details are missing, every RF neighbour is treated as a possible access point, and the message says so.
+* **Removed AC channels.** For RC targets, a live read of the node's radios before flashing. Any 802.11ac 5 GHz radio (one that offers 80 MHz) whose channel and width overlap 48, 52, 56 or 64 is BLOCKED; for example 60 at 40 MHz overlaps 64.
+* **IPQ40xx reboot freeze.** `ipq40xx` hardware upgrading *from* 4.26.7.0 gets a review warning that it may need one power cycle. If it doesn't come back, the failure says this is the likely cause.
+* **Radio details after an upgrade.** They're re-read when an upgrade succeeds, and stored with the firmware they were read on. Details read on other firmware are marked out of date and excluded from radio choices until read again.
+
 ## Radio settings (channel / width / mode)
 Changing an RF node's channel, width, or mode cuts its RF links to every neighbor still on the old settings, so working edge-inward one node at a time would strand each node as it goes. Instead, each **RF cluster** switches together.
 
@@ -215,6 +225,7 @@ The job (`aredn-fleet radio`):
 * [x] Editable mesh SSID (group or per node) with live preview; never reset implicitly
 * [x] Node-specific settings that stay in the group, with list marker, editor, merge, and expected-link logic
 * [x] Review ledger before execute (wave order / per-radio before→after), execution bound to the reviewed dry run
+* [x] RC safeguards: pre-flash config backups, PtMP AP before stations, removed AC channels blocked, IPQ40xx freeze warning, radio re-read/out-of-date marking
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)
 * [ ] Nightly: run `tools/recon/recon-nightly.sh`, then multi-channel stations and the bulk settings job (internet bypass/sharing)
 * [ ] Package the revert script as the optional .ipk agent

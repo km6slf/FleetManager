@@ -158,7 +158,9 @@ def cmd_upgrade(args) -> int:
     def show(r):
         print(f"[{r.status:13}] {r.node:24} {r.profile:24} {r.detail}", flush=True)
 
-    cfg = UpgradeConfig(soak_seconds=args.soak)
+    from .rc import is_rc_or_later
+    cfg = UpgradeConfig(soak_seconds=args.soak, backup_dir=CONFIG_DIR / "backups",
+                        rc_checks=is_rc_or_later(release.version))
     report = asyncio.run(run_rollout(
         plan, release, store, lambda n: connect(n, creds), sysinfo, cfg,
         execute=args.execute, audit=Path(args.audit) if args.audit else None, on_result=show))

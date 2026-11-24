@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ..firmware import FirmwareStore, Release, match_profile
+from ..rc import at_least_4267, ipq40xx_freeze_note, removed_channel_conflict, station_radios
+from .radio import read_node_radios
 from ..topology import Plan
 from ..transport import NodeSession
 
@@ -46,6 +48,8 @@ class UpgradeConfig:
     soak_seconds: float = 180     # TBD: field-tune on the lab mesh
     ram_margin_kb: int = 4096
     launch_check_seconds: float = 8
+    backup_dir: Path | None = None   # save each node's config here before flashing
+    rc_checks: bool = False          # target is the release candidate (or later)
 
 
 @dataclass
@@ -56,6 +60,8 @@ class NodeResult:
     from_version: str = ""
     to_version: str = ""
     profile: str = ""
+    notes: list[str] = field(default_factory=list)   # non-blocking warnings for the review
+    backup: str = ""
 
 
 class AuditLog:
@@ -68,6 +74,14 @@ class AuditLog:
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "node": node, "event": event, **data}
         with self.path.open("a") as f:
             f.write(json.dumps(rec) + "\n")
+
+
+def _rf_neighbours(sysinfo: dict[str, Any] | None) -> set[str]:
+    out = set()
+    for e in ((sysinfo or {}).get("link_info") or {}).values():
+        if e.get("hostname") and str(e.get("linkType", "")).upper() == "RF":
+            out.add(e["hostname"].lower().removesuffix(".local.mesh"))
+    return out
 
 
 def _neighbours(sysinfo: dict[str, Any] | None) -> set[str]:
@@ -111,6 +125,13 @@ class NodeUpgrade:
     dependents: set[str] = field(default_factory=set)
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.monotonic
+    on_inventory: Callable[[str, Any], None] | None = None
+    earlier: set[str] = field(default_factory=set)    # nodes this run upgrades before this one
+    in_run: set[str] = field(default_factory=set)     # every node in this run
+    access_points: set[str] | None = None             # this station's PtMP AP(s); None = unknown
+    earlier: set[str] = field(default_factory=set)    # nodes this run upgrades before this one
+    in_run: set[str] = field(default_factory=set)     # every node in this run
+    access_points: set[str] | None = None             # this station's PtMP AP(s); None = unknown
 
     async def run(self, execute: bool) -> NodeResult:
         res = NodeResult(self.node, to_version=self.release.version)
@@ -153,6 +174,13 @@ class NodeUpgrade:
             res.status, res.detail = "skipped", "already on target version"
             return res
 
+        if note := ipq40xx_freeze_note(profile.target, res.from_version):
+            res.notes.append(note)
+        if self.cfg.rc_checks:
+            why = await self._rc_preflight(s, before)
+            if why:
+                return self._fail(res, why)
+
         meminfo = (await s.run("cat /proc/meminfo")).stdout
         avail = _kb(meminfo, "MemAvailable:") or _kb(meminfo, "MemFree:")
         need = image.size // 1024 + self.cfg.ram_margin_kb
@@ -169,6 +197,12 @@ class NodeUpgrade:
             return res
 
         # ---- point of no return starts below; log every step
+        if self.cfg.backup_dir:
+            try:
+                res.backup = await self._backup(s, res.from_version)
+            except Exception as exc:  # noqa: BLE001
+                return self._fail(res, f"config backup failed ({exc}); not upgrading without one")
+            self.log(self.node, "backup", path=res.backup)
         self.log(self.node, "upload", image=image.name)
         await s.upload(local, REMOTE_IMAGE)
         sha = (await s.run(f"sha256sum {REMOTE_IMAGE}")).stdout.split()[:1]
@@ -207,7 +241,9 @@ class NodeUpgrade:
         self.log(self.node, "down")
 
         if not await self._wait(lambda si: si is not None, self.cfg.up_timeout):
-            return self._fail(res, "node did not come back within up_timeout")
+            hint = (" This is probably the IPQ40xx reboot freeze: power-cycle the node."
+                    if any("IPQ40xx" in n for n in res.notes) else "")
+            return self._fail(res, "node did not come back within up_timeout." + hint)
         after = await self.sysinfo(self.node)
         if _fw(after) != self.release.version:
             return self._fail(res, f"came back on {_fw(after)!r}, expected {self.release.version}")
@@ -229,7 +265,65 @@ class NodeUpgrade:
 
         res.status, res.detail = "ok", f"{res.from_version} -> {self.release.version}"
         self.log(self.node, "ok")
+        await self._reread_radios()
         return res
+
+    async def _rc_preflight(self, s: NodeSession, before: dict[str, Any] | None) -> str | None:
+        """Checks from AREDN's RC notes, on live data from the node."""
+        inv = await read_node_radios(s)
+        for r in inv.radios:
+            if why := removed_channel_conflict(r):
+                return why
+        if station_radios(inv):
+            # Its PtMP access point(s), from the neighbours' radio details. If those aren't
+            # known, be cautious and treat every RF neighbour as a possible access point.
+            guessed = self.access_points is None
+            aps = (_rf_neighbours(before) if guessed else self.access_points)
+            hint = (" (couldn't tell which RF neighbour is its access point; read radios for its "
+                    "neighbours to narrow this down)") if guessed else ""
+            for ap in sorted(aps):
+                if ap in self.earlier:
+                    continue        # upgraded earlier in this run (a failure there stops the run)
+                fw = _fw(await self.sysinfo(ap))
+                if fw and at_least_4267(fw):
+                    continue
+                if ap in self.in_run:
+                    return (f"Mesh Station: its PtMP access point {ap} is in this run but scheduled "
+                            f"after it, because the radio details of {ap} or this node haven't been "
+                            f"read. Read radios for both and review again, so {ap} goes first.{hint}")
+                if not fw:
+                    return (f"Mesh Station: can't check its PtMP access point {ap}; it must run "
+                            f"4.26.7.0 or the RC before this node is upgraded.{hint}")
+                return (f"Mesh Station: its PtMP access point {ap} runs {fw}. Upgrade {ap} to "
+                        f"4.26.7.0 or the RC first (AREDN RC notes).{hint}")
+        return None
+
+    async def _backup(self, s: NodeSession, from_version: str) -> str:
+        remote = "/tmp/aredn-fleet-backup.tgz"
+        await s.run(f"ucode -e 'import * as c from \"aredn.configuration\"; c.backup(\"{remote}\");'",
+                    timeout=60)
+        data = await s.download(remote)
+        await s.run(f"rm -f {remote}")
+        if len(data) < 20 or data[:2] != b"\x1f\x8b":
+            raise ValueError("the node didn't produce a valid backup file")
+        d = Path(self.cfg.backup_dir) / self.node
+        d.mkdir(parents=True, exist_ok=True)
+        out = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{from_version or 'unknown'}.tgz"
+        out.write_bytes(data)
+        return str(out)
+
+    async def _reread_radios(self) -> None:
+        """Channel lists can change with firmware (the RC drops some); refresh them."""
+        if not self.on_inventory:
+            return
+        try:
+            s = await self.connect(self.node)
+            try:
+                self.on_inventory(self.node, await read_node_radios(s))
+            finally:
+                await s.close()
+        except Exception:  # noqa: BLE001 - not worth failing a good upgrade over
+            self.log(self.node, "radio-reread-failed")
 
     async def _wait(self, pred: Callable[[Any], bool], timeout: float) -> bool:
         async def apred(si):
@@ -259,20 +353,27 @@ async def run_rollout(plan: Plan, release: Release, store: FirmwareStore, connec
                       sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                       clock: Callable[[], float] = time.monotonic,
                       on_result: Callable[[NodeResult], None] | None = None,
-                      should_stop: Callable[[], bool] | None = None) -> RolloutReport:
+                      should_stop: Callable[[], bool] | None = None,
+                      on_inventory: Callable[[str, Any], None] | None = None,
+                      access_points: dict[str, set[str]] | None = None) -> RolloutReport:
+    """``access_points`` maps a Mesh Station to its PtMP access point(s), where known."""
     cfg = cfg or UpgradeConfig()
     log = AuditLog(audit)
     log("-", "rollout-start", execute=execute, version=release.version, waves=plan.waves)
     results: list[NodeResult] = []
     finished: list[str] = []
 
+    in_run = {n for w in plan.waves for n in w}
     for i, wave in enumerate(plan.waves):
+        earlier = {n for w in plan.waves[:i] for n in w}
         if should_stop and should_stop():
             reason = f"stopped by operator before wave {i + 1}"
             log("-", "rollout-stopped", reason=reason)
             return RolloutReport(results, True, reason)
         jobs = [NodeUpgrade(n, release, store, connect, sysinfo, cfg, log,
-                            plan.dependents.get(n, set()), sleep, clock) for n in wave]
+                            plan.dependents.get(n, set()), sleep, clock, on_inventory, earlier, in_run,
+                            (access_points or {}).get(n))
+                for n in wave]
         wave_results = await asyncio.gather(*(j.run(execute) for j in jobs))
         for r in wave_results:
             results.append(r)

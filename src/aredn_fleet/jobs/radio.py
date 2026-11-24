@@ -138,18 +138,19 @@ class NodeRadios:
     radios: list[RadioInfo]
     multi_mesh: bool | None          # None = couldn't tell
     read_at: float = field(default_factory=time.time)
+    firmware: str = ""               # firmware the node ran when read (channel lists can change)
 
     def by_band(self, band: str) -> RadioInfo | None:
         return next((r for r in self.radios if r.band == band), None)
 
     def to_json(self) -> dict[str, Any]:
         return {"radios": [asdict(r) for r in self.radios], "multi_mesh": self.multi_mesh,
-                "read_at": self.read_at}
+                "read_at": self.read_at, "firmware": self.firmware}
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "NodeRadios":
         return cls([RadioInfo(**r) for r in d.get("radios", [])], d.get("multi_mesh"),
-                   d.get("read_at", 0))
+                   d.get("read_at", 0), d.get("firmware", ""))
 
 
 def _int_or_none(v: Any) -> int | None:
@@ -187,7 +188,12 @@ def parse_radio_inventory(raw: str, caps: str = "unknown") -> NodeRadios:
 async def read_node_radios(session: NodeSession) -> NodeRadios:
     raw = (await session.run(RADIO_STATE_CMD)).stdout
     caps = (await session.run(CAPS_CMD)).stdout
-    return parse_radio_inventory(raw, caps)
+    inv = parse_radio_inventory(raw, caps)
+    try:
+        inv.firmware = (await session.run("cat /etc/mesh-release")).stdout.strip().splitlines()[0]
+    except (IndexError, AttributeError):
+        pass
+    return inv
 
 
 SSID_RE = re.compile(r"[A-Za-z0-9_.-]{1,20}")

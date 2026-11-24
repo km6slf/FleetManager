@@ -1,5 +1,7 @@
 import asyncio
+import gzip
 import hashlib
+import json
 
 from aredn_fleet.firmware import FirmwareStore, Image, Profile, Release
 from aredn_fleet.jobs.upgrade import UpgradeConfig, run_rollout
@@ -21,6 +23,9 @@ class FakeMesh:
         self.broken = set(broken)  # these come back on the old version
         self.commands: list[tuple[str, str]] = []
         self.reject: set[str] = set()
+        self.radios: dict[str, list] = {}        # node -> aredn.radios config (default: 5 GHz mesh)
+        self.fail_backup: set[str] = set()
+        self.backups: set[str] = set()
 
     def neighbours(self, n):
         return {l.b if l.a == n else l.a for l in self.topo.links if n in (l.a, l.b)}
@@ -57,20 +62,39 @@ class FakeMesh:
                     return CommandResult(0, '{"valid": %s}' % ("true" if ok else "false"), "")
                 if "aredn_sysupgrade" in cmd:
                     mesh.reboot_polls[n] = 3
+                if cmd.startswith("ucode -e 'import * as r"):
+                    return CommandResult(0, json.dumps({"config": mesh.radios.get(n, [radio5()])}), "")
+                if "radio-and-antenna" in cmd:
+                    return CommandResult(0, "single-mesh\n", "")
+                if "c.backup" in cmd and n not in mesh.fail_backup:
+                    mesh.backups.add(n)
                 return CommandResult(0, "", "")
 
             async def upload(self, local, remote):
                 mesh.uploaded[n] = local.read_bytes()
+
+            async def download(self, remote):
+                if n not in mesh.backups:
+                    raise OSError("no such file")
+                return gzip.compress(b"config of " + n.encode())
 
             async def close(self):
                 pass
         return S()
 
 
-def release_and_store(tmp_path):
+def radio5(mode="mesh", ch=131, bw=10):
+    chans = {str(w): [{"number": c, "label": f"{c} ({f})", "frequency": f}
+                      for c, f in [(36, 5180), (48, 5240), (52, 5260), (60, 5300), (131, 5655), (149, 5745)]]
+             for w in (10, 20, 40)}
+    return {"iface": "wlan0", "mode": {"mode": mode, "channel": ch, "bandwidth": bw, "ssid": "AREDN"},
+            "def": {"band": "5GHz"}, "bws": [5, 10, 20, 40, 80], "channels": chans}
+
+
+def release_and_store(tmp_path, version="4.26.10.0", target="ath79/generic"):
     img = Image("sysupgrade", "aredn-4.26.10.0-ubnt_rocket-m-sysupgrade.bin", SHA, len(PAYLOAD), "u")
-    prof = Profile("ubnt_rocket-m", "ath79/generic", ["Ubiquiti Rocket M"], ["ubnt,rocket-m"], [img])
-    rel = Release("stable-1", "4.26.10.0", {prof.id: prof})
+    prof = Profile("ubnt_rocket-m", target, ["Ubiquiti Rocket M"], ["ubnt,rocket-m"], [img])
+    rel = Release("stable-1", version, {prof.id: prof})
     store = FirmwareStore(tmp_path)
     p = store.path_for(rel, prof, img)
     p.parent.mkdir(parents=True)
@@ -152,3 +176,166 @@ def test_node_rejecting_image_never_flashes(tmp_path):
     rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, execute=True, sleep=no_sleep))
     assert rep.results[0].status == "failed" and "rejected image" in rep.results[0].detail
     assert not any("aredn_sysupgrade" in c for _, c in mesh.commands)
+
+
+
+# --------------------------------------------------------------------------- RC notes
+
+RC = "20261122-5e4131bf"
+
+
+def rc_mesh(topo, version="4.26.7.0"):
+    mesh = FakeMesh(topo, version=version)
+    orig = mesh.sysinfo
+
+    async def sysinfo(n):           # nodes come back on the RC build
+        si = await orig(n)
+        if si and mesh.version[n] == "4.26.10.0":
+            mesh.version[n] = RC
+            si["node_details"]["firmware_version"] = RC
+        return si
+    mesh.sysinfo = sysinfo
+    return mesh
+
+
+def test_config_backup_saved_before_flashing(tmp_path):
+    t = make_topo()
+    mesh = FakeMesh(t)
+    rel, store = release_and_store(tmp_path / "fw")
+    cfg = UpgradeConfig(**{**CFG.__dict__, "backup_dir": tmp_path / "backups"})
+    plan = plan_rollout(t, "hub", ["far1"])
+    rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, cfg, execute=True, sleep=no_sleep))
+    r = rep.results[0]
+    assert r.status == "ok" and r.backup
+    saved = list((tmp_path / "backups" / "far1").glob("*-4.26.7.0.tgz"))
+    assert len(saved) == 1 and gzip.decompress(saved[0].read_bytes()) == b"config of far1"
+    cmds = [c for n, c in mesh.commands if n == "far1"]
+    assert next(i for i, c in enumerate(cmds) if "c.backup" in c) < next(i for i, c in enumerate(cmds) if "aredn_sysupgrade" in c)
+
+
+def test_no_backup_no_upgrade(tmp_path):
+    t = make_topo()
+    mesh = FakeMesh(t)
+    mesh.fail_backup = {"far1"}
+    rel, store = release_and_store(tmp_path / "fw")
+    cfg = UpgradeConfig(**{**CFG.__dict__, "backup_dir": tmp_path / "backups"})
+    rep = run(run_rollout(plan_rollout(t, "hub", ["far1"]), rel, store, mesh.connect, mesh.sysinfo, cfg,
+                          execute=True, sleep=no_sleep))
+    assert rep.results[0].status == "failed" and "backup" in rep.results[0].detail
+    assert not any("aredn_sysupgrade" in c for _, c in mesh.commands)
+
+
+def test_dry_run_takes_no_backup(tmp_path):
+    t = make_topo()
+    mesh = FakeMesh(t)
+    rel, store = release_and_store(tmp_path / "fw")
+    cfg = UpgradeConfig(**{**CFG.__dict__, "backup_dir": tmp_path / "backups"})
+    run(run_rollout(plan_rollout(t, "hub", ["far1"]), rel, store, mesh.connect, mesh.sysinfo, cfg, sleep=no_sleep))
+    assert not mesh.backups
+
+
+def test_rc_blocks_removed_ac_channels(tmp_path):
+    t = make_topo()
+    mesh = FakeMesh(t)
+    mesh.radios = {"far1": [radio5(ch=52, bw=10)], "far2": [radio5(ch=60, bw=40)], "relay": [radio5(ch=60, bw=10)]}
+    rel, store = release_and_store(tmp_path / "fw", version=RC)
+    cfg = UpgradeConfig(**{**CFG.__dict__, "rc_checks": True})
+    plan = plan_rollout(t, "hub", ["far1", "far2", "relay"], max_parallel=3)
+    rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, cfg, sleep=no_sleep))
+    by = {r.node: r for r in rep.results}
+    assert by["far1"].status == "failed" and "channel 52" in by["far1"].detail
+    assert by["far2"].status == "failed" and "64" in by["far2"].detail      # 60 @ 40 MHz overlaps 64
+    assert by["relay"].status == "would-upgrade"                             # 60 @ 10 MHz is fine
+
+
+def test_rc_station_needs_its_access_point_on_4267(tmp_path):
+    t = Topology()
+    t.add_link("hub", "ap")
+    t.add_link("ap", "sta")
+    rel, store = release_and_store(tmp_path / "fw", version=RC)
+    cfg = UpgradeConfig(**{**CFG.__dict__, "rc_checks": True})
+    for ap_version, ok in (("4.26.1.0", False), ("4.26.7.0", True)):
+        mesh = FakeMesh(t, version="4.26.1.0")
+        mesh.version["ap"] = ap_version
+        mesh.radios = {"sta": [radio5(mode="meshsta", ch=149, bw=10)], "ap": [radio5(mode="meshap", ch=149, bw=10)]}
+        rep = run(run_rollout(plan_rollout(t, "hub", ["sta"]), rel, store, mesh.connect, mesh.sysinfo, cfg,
+                              sleep=no_sleep))
+        r = rep.results[0]
+        assert (r.status == "would-upgrade") == ok, r.detail
+        if not ok:
+            assert "access point ap runs 4.26.1.0" in r.detail
+
+
+def test_rc_rollout_upgrades_access_point_then_station(tmp_path):
+    t = Topology()
+    t.add_link("hub", "ap")
+    t.add_link("ap", "sta")
+    mesh = rc_mesh(t, version="4.26.1.0")
+    mesh.radios = {"sta": [radio5(mode="meshsta", ch=149, bw=10)], "ap": [radio5(mode="meshap", ch=149, bw=10)]}
+    rel, store = release_and_store(tmp_path / "fw", version=RC)
+    cfg = UpgradeConfig(**{**CFG.__dict__, "rc_checks": True})
+    plan = plan_rollout(t, "hub", ["ap", "sta"], must_precede=[("ap", "sta")])
+    rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, cfg, execute=True, sleep=no_sleep))
+    assert not rep.stopped_early, rep.reason
+    assert [r.node for r in rep.results] == ["ap", "sta"]
+
+
+def test_ipq40xx_from_4267_gets_a_power_cycle_note(tmp_path):
+    t = make_topo()
+    mesh = FakeMesh(t, version="4.26.7.0")
+    rel, store = release_and_store(tmp_path / "fw", target="ipq40xx/mikrotik")
+    rep = run(run_rollout(plan_rollout(t, "hub", ["far1"]), rel, store, mesh.connect, mesh.sysinfo, CFG,
+                          sleep=no_sleep))
+    assert any("power cycle" in n for n in rep.results[0].notes)
+    mesh2 = FakeMesh(t, version="4.26.1.0")
+    rep2 = run(run_rollout(plan_rollout(t, "hub", ["far1"]), rel, store, mesh2.connect, mesh2.sysinfo, CFG,
+                           sleep=no_sleep))
+    assert rep2.results[0].notes == []
+
+
+def test_radios_reread_after_a_good_upgrade(tmp_path):
+    t = make_topo()
+    mesh = FakeMesh(t)
+    rel, store = release_and_store(tmp_path / "fw")
+    seen = {}
+    rep = run(run_rollout(plan_rollout(t, "hub", ["far1"]), rel, store, mesh.connect, mesh.sysinfo, CFG,
+                          execute=True, sleep=no_sleep, on_inventory=lambda n, inv: seen.setdefault(n, inv)))
+    assert rep.results[0].status == "ok" and "far1" in seen
+
+
+def test_rc_dry_run_accepts_station_when_its_ap_goes_first_in_the_run(tmp_path):
+    t = Topology()
+    t.add_link("hub", "ap")
+    t.add_link("ap", "sta")
+    mesh = FakeMesh(t, version="4.26.1.0")
+    mesh.radios = {"sta": [radio5(mode="meshsta", ch=149, bw=10)], "ap": [radio5(mode="meshap", ch=149, bw=10)]}
+    rel, store = release_and_store(tmp_path / "fw", version=RC)
+    cfg = UpgradeConfig(**{**CFG.__dict__, "rc_checks": True})
+    ordered = plan_rollout(t, "hub", ["ap", "sta"], must_precede=[("ap", "sta")])
+    rep = run(run_rollout(ordered, rel, store, mesh.connect, mesh.sysinfo, cfg, sleep=no_sleep))
+    assert {r.node: r.status for r in rep.results} == {"ap": "would-upgrade", "sta": "would-upgrade"}
+    # without radio details the planner goes edge-first; the station is blocked with a useful reason
+    unordered = plan_rollout(t, "hub", ["ap", "sta"])
+    rep = run(run_rollout(unordered, rel, store, mesh.connect, mesh.sysinfo, cfg, sleep=no_sleep))
+    sta = next(r for r in rep.results if r.node == "sta")
+    assert sta.status == "failed" and "Read radios" in sta.detail
+
+
+def test_rc_station_check_uses_its_real_access_point(tmp_path):
+    # sta is a station of ap on 5 GHz and also meshes with "other" on another radio
+    t = Topology()
+    t.add_link("hub", "ap")
+    t.add_link("ap", "sta")
+    t.add_link("sta", "other")
+    mesh = FakeMesh(t, version="4.26.1.0")
+    mesh.version["ap"] = "4.26.7.0"                    # access point is new enough; "other" is not
+    mesh.radios = {"sta": [radio5(mode="meshsta", ch=149, bw=10)]}
+    rel, store = release_and_store(tmp_path / "fw", version=RC)
+    cfg = UpgradeConfig(**{**CFG.__dict__, "rc_checks": True})
+    plan = plan_rollout(t, "hub", ["sta"])
+    known = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, cfg, sleep=no_sleep,
+                            access_points={"sta": {"ap"}}))
+    assert known.results[0].status == "would-upgrade"
+    guessed = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, cfg, sleep=no_sleep))
+    r = guessed.results[0]
+    assert r.status == "failed" and "other runs 4.26.1.0" in r.detail and "read radios" in r.detail

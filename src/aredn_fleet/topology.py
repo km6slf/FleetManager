@@ -133,12 +133,18 @@ def plan_rollout(
     selected: Iterable[str],
     max_parallel: int = 1,
     exclude_link_kinds: Iterable[str] = (),
+    must_precede: Iterable[tuple[str, str]] = (),
 ) -> Plan:
     """Order ``selected`` nodes into waves, outermost first, root last.
 
     ``exclude_link_kinds`` lets the caller ignore links that should not be
     trusted to carry the manager's traffic during a rollout, e.g. ``("TUN",)``
     if internet tunnels are flaky.
+
+    ``must_precede`` holds ``(a, b)`` pairs where ``a`` must be finished before
+    ``b`` starts, even if ``b`` sits further out. Example: a PtMP access point
+    must run new enough firmware before its Mesh Stations are upgraded. ``b``
+    simply drops off while ``a`` reboots and is checked when ``a`` comes back.
     """
     if max_parallel < 1:
         raise PlanError("max_parallel must be >= 1")
@@ -161,13 +167,28 @@ def plan_rollout(
                 f"{', '.join(sorted(unselected_cut))}; they will drop off briefly during its reboot"
             )
 
+    before: dict[str, set[str]] = {}   # node -> selected nodes that must finish first
+    after: dict[str, set[str]] = {}    # node -> selected nodes allowed to wait for it
+    for a, b in must_precede:
+        if a in pending and b in pending and a != b:
+            before.setdefault(b, set()).add(a)
+            after.setdefault(a, set()).add(b)
+
+    def waits_for(n: str) -> set[str]:
+        # Normally a node waits for its selected dependents. Nodes that must come
+        # *after* it (and whatever sits behind them) don't hold it back.
+        exempt = set()
+        for b in after.get(n, ()):
+            exempt |= {b} | deps.get(b, set())
+        return ((deps[n] & selected_set) - exempt) | before.get(n, set())
+
     done: set[str] = set()
     waves: list[list[str]] = []
     while pending:
         ready = [
             n for n in pending
             if n != root or pending == {root}
-            if not ((deps[n] & selected_set) - done - {n})
+            if not (waits_for(n) - done - {n})
         ]
         if not ready:  # cannot happen for a connected graph, but never loop forever
             raise PlanError(f"no node is ready; stuck with {sorted(pending)}")
@@ -190,8 +211,10 @@ def plan_rollout(
             # down, so it can be verified as soon as it comes back.
             if any(m not in _reachable(adj, root, trial - {m}) for m in trial):
                 continue
-            # Don't put a node in the same wave as something it depends on.
-            if any(cand in deps[m] or m in deps[cand] for m in wave):
+            # Don't put a node in the same wave as something it depends on,
+            # or as something it must follow.
+            if any(cand in deps[m] or m in deps[cand] or m in before.get(cand, ())
+                   or cand in before.get(m, ()) for m in wave):
                 continue
             wave.append(cand)
         if not wave:

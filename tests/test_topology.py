@@ -104,3 +104,28 @@ def test_crawl_with_fake_fetcher():
     assert len(res.topology.links) == 3
     plan = plan_rollout(res.topology, "km6slf-hub", sorted(res.nodes))
     assert flat(plan)[0] == "km6slf-c" and flat(plan)[-1] == "km6slf-hub"
+
+
+def test_must_precede_puts_ptmp_ap_before_its_stations():
+    # root - ap ~ sta1, sta2 (stations hang off the AP); behind sta1 sits x
+    t = Topology()
+    t.add_link("root", "ap")
+    t.add_link("ap", "sta1")
+    t.add_link("ap", "sta2")
+    t.add_link("sta1", "x")
+    nodes = ["ap", "sta1", "sta2", "x"]
+    normal = flat(plan_rollout(t, "root", nodes))
+    assert normal.index("sta1") < normal.index("ap")          # edge-first by default
+    plan = plan_rollout(t, "root", nodes, must_precede=[("ap", "sta1"), ("ap", "sta2")])
+    order = flat(plan)
+    assert order.index("ap") < order.index("sta1") and order.index("ap") < order.index("sta2")
+    assert order.index("x") < order.index("ap")               # x isn't a station: still outermost first
+    assert order.index("x") < order.index("sta1")             # and still before the node it sits behind
+
+
+def test_must_precede_never_shares_a_wave():
+    t = Topology()
+    t.add_link("root", "ap")
+    t.add_link("ap", "sta")
+    plan = plan_rollout(t, "root", ["ap", "sta"], max_parallel=4, must_precede=[("ap", "sta")])
+    assert plan.waves == [["ap"], ["sta"]]

@@ -33,6 +33,7 @@ class NodeSession(Protocol):
 
     async def run(self, command: str, timeout: float = 60) -> CommandResult: ...
     async def upload(self, local: Path, remote: str) -> None: ...
+    async def download(self, remote: str) -> bytes: ...
     async def close(self) -> None: ...
 
 
@@ -59,6 +60,12 @@ class SSHSession:
                     await proc.stdin.drain()
             proc.stdin.write_eof()
             await proc.wait(check=True)
+
+    async def download(self, remote: str) -> bytes:
+        r = await self._conn.run(f"cat {shlex.quote(remote)}", encoding=None, check=False, timeout=60)
+        if r.exit_status != 0:
+            raise OSError(f"couldn't read {remote} from {self.node}")
+        return bytes(r.stdout or b"")
 
     async def close(self) -> None:
         self._conn.close()

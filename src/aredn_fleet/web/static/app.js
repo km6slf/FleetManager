@@ -107,7 +107,8 @@ function renderNodes() {
 
 function rfCell(n) {
   if (n.radios) {
-    return `<div class="chips">${n.radios.map((r) => {
+    const stale = n.radios_stale ? '<span class="chip off" title="Read when the node ran other firmware; channel lists may have changed">out of date — read radios again</span>' : "";
+    return `<div class="chips">${stale}${n.radios.map((r) => {
       const mesh = ["mesh", "meshap", "meshptp", "meshsta"].includes(r.mode);
       const detail = mesh ? ` · ${esc(r.label)} · ${r.bandwidth} MHz` : "";
       return `<span class="chip ${r.mode === "off" ? "off" : ""}"><span class="bandtag">${esc(r.band_label)}</span>${esc(r.mode_label)}${detail}</span>`;
@@ -215,11 +216,14 @@ async function loadRadioPanel() {
     return;
   }
   radioOpts = await api("/api/radio/options", { body: { nodes } });
-  const miss = radioOpts.missing;
+  const miss = radioOpts.missing, stale = radioOpts.stale || [];
+  const fresh = miss.filter((n) => !stale.includes(n));
   $("#radio-missing").classList.toggle("hidden", !miss.length);
-  $("#radio-missing span").textContent = miss.length
-    ? `Radio details not read yet for ${miss.length} selected node${miss.length > 1 ? "s" : ""} (${miss.slice(0, 3).join(", ")}${miss.length > 3 ? "…" : ""}).`
-    : "";
+  const list = (a) => `${a.slice(0, 3).join(", ")}${a.length > 3 ? "…" : ""}`;
+  $("#radio-missing span").textContent = [
+    fresh.length ? `Radio details not read yet for ${list(fresh)}.` : "",
+    stale.length ? `Out of date after a firmware change for ${list(stale)}.` : "",
+  ].filter(Boolean).join(" ");
   if (!radioOpts.bands.length) {
     box.innerHTML = '<p class="hint">No radio details for the selected nodes yet. Press <b>Read radios</b> (logs in over SSH, read-only).</p>';
     return;
@@ -456,11 +460,15 @@ function upgradeLedger(r) {
         : '<span class="st-blocked">BLOCKED</span>';
       return `<tr><td><b>${esc(x.node)}</b></td><td>${esc(x.model)}</td><td>${esc(x.profile || "")}</td>
         <td class="${x.from_version === x.to_version ? "same" : "chg"}">${esc(x.from_version || "?")}<span class="arrow">→</span><b>${esc(x.to_version)}</b></td>
-        <td>${st}</td><td class="why">${x.status === "failed" ? esc(x.detail) : ""}</td></tr>`;
+        <td>${st}</td><td class="why">${x.status === "failed" ? esc(x.detail) : ""}${(x.notes || []).map((n) => `<div class="lost">⚠ ${esc(n)}</div>`).join("")}</td></tr>`;
     }).join("")).join("");
   const warns = [...(r.warnings || []), ...(r.unreachable?.length ? ["Skipped, unreachable: " + r.unreachable.join(", ")] : [])]
     .map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("");
+  const apFirst = (r.ptmp_order || []).map(([a, s]) => `${a} before ${s}`).join(", ");
   return `<p class="summary-line"><b>${go}</b> node(s) will be upgraded to <b>${esc(r.version)}</b> (${esc(r.channel)}), outermost first, one wave at a time. Each wave is checked before the next starts, and the run stops at the first failure.</p>
+    <p class="summary-line">Before each node is flashed, its configuration is backed up to <code>${esc(r.backup_dir)}</code> (it can include the node's password hash and Wi-Fi keys; it stays on this computer).</p>
+    ${apFirst ? `<p class="summary-line">PtMP access points go before their Mesh Stations: ${esc(apFirst)}.</p>` : ""}
+    ${r.rc ? `<p class="summary-line"><b>Release-candidate checks are on:</b> Mesh Stations wait for their access point to run 4.26.7.0 or the RC; AC radios using channels 48, 52, 56 or 64 (also through a wide channel) are blocked; IPQ40xx nodes on 4.26.7.0 are flagged for a possible power cycle.</p>` : ""}
     <table class="ledger"><thead><tr><th>Node</th><th>Model</th><th>Image</th><th>Firmware</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>${warns}
     ${r.blocked.length ? `<p class="st-blocked">Blocked: ${esc(r.blocked.join(", "))}. Fix these (or deselect them) and review again.</p>` : ""}`;
 }

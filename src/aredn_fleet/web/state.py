@@ -206,6 +206,15 @@ class AppState:
             "info": self.nodes, "errors": self.errors, "root": self.root,
             "discovered_at": self.discovered_at, "radios": self.radios}, indent=1))
 
+    def radios_stale(self, node: str) -> bool:
+        """Radio details read on different firmware than the node runs now."""
+        inv, fw = self.radios.get(node) or {}, (self.nodes.get(node) or {}).get("firmware", "")
+        return bool(inv.get("firmware") and fw and inv["firmware"] != fw)
+
+    def set_firmware(self, node: str, version: str) -> None:
+        self.nodes.setdefault(node, {})["firmware"] = version
+        self.save_topology()
+
     def set_radios(self, node: str, inv) -> None:
         self.radios[node] = inv.to_json()
         self.save_topology()
@@ -226,6 +235,7 @@ class AppState:
                 "channel": rf.get("channel"), "chanbw": rf.get("chanbw"), "rfmode": rf.get("mode"),
                 "neighbours": sorted(adj.get(n, ())),
                 "radios": radio_summary(self.radios.get(n)),
+                "radios_stale": self.radios_stale(n),
                 "custom": custom_summary(self.overrides.get(n)),
                 "radios_read_at": (self.radios.get(n) or {}).get("read_at"),
             })
@@ -257,7 +267,8 @@ def _radio_freq(r) -> int:
     return min(fs) if fs else 0
 
 
-def radio_options(radios: dict[str, dict[str, Any]], nodes: list[str]) -> dict[str, Any]:
+def radio_options(radios: dict[str, dict[str, Any]], nodes: list[str],
+                  stale: set[str] | None = None) -> dict[str, Any]:
     """Choices for the bulk radio panel: per band, what every selected node can do.
 
     Widths and channels are the intersection across the selected nodes that
@@ -267,7 +278,8 @@ def radio_options(radios: dict[str, dict[str, Any]], nodes: list[str]) -> dict[s
     """
     from ..jobs.radio import MESH_MODES, NodeRadios, band_label
 
-    known = {n: NodeRadios.from_json(radios[n]) for n in nodes if n in radios}
+    stale = stale or set()
+    known = {n: NodeRadios.from_json(radios[n]) for n in nodes if n in radios and n not in stale}
     missing = sorted(set(nodes) - set(known))
     bands: dict[str, dict[str, Any]] = {}
     for n, inv in known.items():
@@ -312,7 +324,7 @@ def radio_options(radios: dict[str, dict[str, Any]], nodes: list[str]) -> dict[s
                              == 1 else None),
         })
     multi = [inv.multi_mesh for inv in known.values()]
-    return {"bands": out, "missing": missing,
+    return {"bands": out, "missing": missing, "stale": sorted(set(nodes) & stale),
             "multi_mesh": all(m is True for m in multi) if multi else False}
 
 

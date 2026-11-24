@@ -268,12 +268,18 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
         return start("firmware", "Fetch firmware", False, body)
 
     # ------------------------------------------------------------ plan / upgrade
+    def ptmp_order(nodes: list[str]) -> list[tuple[str, str]]:
+        # AREDN RC notes: a PtMP access point must be upgraded before its Mesh Stations.
+        from ..rc import ptmp_pairs
+        sel = set(nodes)
+        return [(a, b) for a, b in ptmp_pairs(state.topology.links, state.radios) if a in sel and b in sel]
+
     def make_plan(req: PlanReq):
         if not state.root:
             raise HTTPException(400, "run Discover first")
         try:
             return plan_rollout(state.topology, state.root, req.nodes, req.parallel,
-                                ("TUN",) if req.exclude_tunnels else ())
+                                ("TUN",) if req.exclude_tunnels else (), ptmp_order(req.nodes))
         except PlanError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -289,7 +295,8 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
         if req.execute and req.confirm.strip().lower() != "upgrade":
             raise HTTPException(400, "type 'upgrade' to confirm")
         fp = fingerprint({"nodes": sorted(req.nodes), "version": req.version, "parallel": req.parallel,
-                          "soak": req.soak, "tunnels": req.exclude_tunnels, "root": state.root})
+                          "soak": req.soak, "tunnels": req.exclude_tunnels, "root": state.root,
+                          "order": ptmp_order(req.nodes)})
         if req.execute and (why := state.jobs.reviewed(req.reviewed_job, "upgrade", fp)):
             raise HTTPException(409, why)
         p = make_plan(req)
@@ -298,10 +305,20 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             raise HTTPException(400, f"{req.version} isn't downloaded; fetch it on the Firmware tab")
         release = store.load_release(req.version)
 
+        from ..rc import is_rc_or_later
+        rc = is_rc_or_later(release.version)
+        backup_dir = state.config_dir / "backups"
+
         async def body(job: Job):
             from ..jobs.upgrade import UpgradeConfig, run_rollout
 
             creds = state.creds()
+            no_radios = sorted(n for n in req.nodes if n not in state.radios or state.radios_stale(n))
+            extra_warn = []
+            if rc and no_radios:
+                extra_warn.append("Radio details missing or out of date for " + ", ".join(no_radios)
+                                  + ": PtMP access points can't be ordered before their stations "
+                                    "until radios are read (stations are blocked rather than risked).")
             job.log(f"{'UPGRADE' if req.execute else 'Dry run'} to {release.version}: "
                     + " → ".join(f"[{', '.join(w)}]" for w in p.waves))
             for w in p.warnings:
@@ -310,12 +327,24 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             def on_result(r):
                 lvl = {"failed": "error", "ok": "ok", "skipped": "info"}.get(r.status, "info")
                 job.log(f"{r.node}: {r.status} {r.detail}", lvl, node=r.node, status=r.status)
+                for n in r.notes:
+                    job.log(f"{r.node}: {n}", "warn")
+                if r.backup:
+                    job.log(f"{r.node}: configuration backed up to {r.backup}")
+                if r.status == "ok":
+                    state.set_firmware(r.node, r.to_version)
 
+            cfg = UpgradeConfig(soak_seconds=req.soak, backup_dir=backup_dir, rc_checks=rc)
+            from ..rc import ptmp_pairs
+            aps: dict[str, set[str]] = {}
+            for ap, sta in ptmp_pairs(state.topology.links, state.radios):
+                aps.setdefault(sta, set()).add(ap)
             rep = await run_rollout(
                 p, release, store, state.connect_factory(creds),
-                state.sysinfo, UpgradeConfig(soak_seconds=req.soak), execute=req.execute,
+                state.sysinfo, cfg, execute=req.execute,
                 audit=state.audit_path, on_result=on_result,
-                should_stop=lambda: job.stop_requested)
+                should_stop=lambda: job.stop_requested, on_inventory=state.set_radios,
+                access_points=aps)
             state.save_creds(creds)
             if rep.stopped_early:
                 job.status = "stopped" if job.stop_requested else "failed"
@@ -327,7 +356,9 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             rows = [{**asdict(r), "wave": wave_of.get(r.node), "model": models.get(r.node, "")}
                     for r in rep.results]
             return {"version": release.version, "channel": release.channel, "waves": p.waves,
-                    "warnings": p.warnings, "unreachable": sorted(p.unreachable), "results": rows,
+                    "warnings": extra_warn + p.warnings, "unreachable": sorted(p.unreachable),
+                    "results": rows, "rc": rc, "backup_dir": str(backup_dir),
+                    "ptmp_order": ptmp_order(req.nodes),
                     "reason": rep.reason, "blocked": [r["node"] for r in rows if r["status"] == "failed"]}
 
         title = f"{'Upgrade' if req.execute else 'Dry run'} → {release.version} ({len(req.nodes)} nodes)"
@@ -371,7 +402,8 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
     @app.post("/api/radio/options")
     async def radio_opts(req: NodesReq):
-        return radio_options(state.radios, req.nodes)
+        stale = {n for n in req.nodes if state.radios_stale(n)}
+        return radio_options(state.radios, req.nodes, stale)
 
     @app.post("/api/radio")
     async def radio(req: RadioReq):

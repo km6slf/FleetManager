@@ -302,3 +302,33 @@ def test_radio_review_ledger_and_changed_plan_is_refused(client):
     client.put("/api/overrides/far1", json={"radio": {"5GHz": {"channel": 133}}})
     r = client.post("/api/radio", json={**body, "execute": True, "confirm": "switch", "reviewed_job": job["id"]})
     assert r.status_code == 409 and "something changed" in r.json()["detail"]
+
+
+def test_plan_puts_ptmp_access_point_before_its_station(client):
+    from aredn_fleet.jobs.radio import parse_radio_inventory
+    st = client.state
+
+    def inv(mode):
+        return parse_radio_inventory(json.dumps({"config": [{"iface": "wlan0",
+            "mode": {"mode": mode, "channel": 149, "bandwidth": 10}, "def": {"band": "5GHz"},
+            "bws": [10], "channels": {}}]}))
+    st.set_radios("relay", inv("meshap"))
+    st.set_radios("far1", inv("meshsta"))
+    p = client.post("/api/plan", json={"nodes": ["relay", "far1", "far2"], "parallel": 1}).json()
+    order = [n for w in p["waves"] for n in w]
+    assert order.index("relay") < order.index("far1")      # AP first (RC notes)
+    assert order.index("far2") < order.index("relay")      # far2 isn't a station: still edge-first
+
+
+def test_radio_details_go_stale_when_firmware_changes(client):
+    from aredn_fleet.jobs.radio import parse_radio_inventory
+    st = client.state
+    inv = parse_radio_inventory(json.dumps(_hap()), "single-mesh")
+    inv.firmware = "4.26.1.0"
+    st.set_radios("far1", inv)
+    node = lambda: next(n for n in client.get("/api/topology").json()["nodes"] if n["name"] == "far1")
+    assert node()["radios_stale"] is False
+    st.set_firmware("far1", "20261122-5e4131bf")
+    assert node()["radios_stale"] is True
+    o = client.post("/api/radio/options", json={"nodes": ["far1"]}).json()
+    assert o["stale"] == ["far1"] and o["missing"] == ["far1"] and o["bands"] == []
