@@ -6,9 +6,15 @@ Safe, bulk updating of AREDN® mesh nodes: discover the mesh, choose nodes from 
 
 ## Quick start
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,ssh]"
+aredn-fleet firmware channels                # 2 newest stable + newest nightly
+aredn-fleet firmware fetch                   # sysupgrade images for all hardware, sha256-verified
+aredn-fleet creds add fleetkey --key ~/.ssh/aredn_ed25519
+aredn-fleet creds add oldpw --password-env AREDN_PW_OLD
 aredn-fleet discover -o mesh.json            # crawl from localnode
 aredn-fleet plan mesh.json --root <your-node> --parallel 2
+aredn-fleet upgrade mesh.json --root <your-node> --version 4.26.10.0           # dry run
+aredn-fleet upgrade mesh.json --root <your-node> --version 4.26.10.0 --execute
 pytest
 ```
 

@@ -29,6 +29,18 @@ Safe, bulk updating of AREDN nodes. Inspired by the "Fleet Manager … doesn't e
 * The edge type comes from `linkType` (RF, DTD, TUN, …). Tunnels can be left out of planning (`--exclude TUN`) when they shouldn't be trusted during a rollout.
 * Planned: cross-check against Babel's routing table over SSH, and keep traceroute (`traceroute` on the node, or from the host) as a diagnostic for links that disagree.
 
+## Firmware catalog
+* Source: AREDN Firmware Selector metadata on `downloads.arednmesh.org` (or a local rsync mirror via `--mirror`).
+  * `afs/www/config.js` holds the `versions` map, with every release and nightly mapped to a data directory.
+  * `afs/www/data/<ver>/overview.json` holds the hardware profiles (`id`, `target`, `titles`).
+  * `afs/www/data/<ver>/<target>/<id>.json` holds `image_path`, `supported_devices` (OpenWrt board names) and `images` (`type`, `name`, `sha256`, `size`).
+* Default channels are the **2 newest stable releases plus the newest nightly**. Both counts are configurable (`--stable N`, `--no-nightly`).
+* `aredn-fleet firmware fetch` downloads the sysupgrade image for **every hardware profile** in each channel. `--include-factory` adds first-install images, and `--profiles` narrows the set.
+* Every image is checked against its published SHA-256 before it's kept. Bad downloads are discarded, and cached files are re-verified rather than downloaded again.
+* Cache layout is `~/.cache/aredn-fleet/firmware/<version>/<target>/<image>`, with a `manifest.json` per version.
+* Nightly images live at `snapshots/targets/...` and are overwritten every night, so a stale nightly catalog fails its hash check instead of installing the wrong build. Fetch again before using a nightly.
+* Node-to-image matching uses `/tmp/sysinfo/board_name` against `supported_devices`. The sysinfo model string is only a fallback, and the job refuses to run unless exactly one profile matches.
+
 ## Rollout planning (firmware)
 * `root` is the node the manager reaches the mesh through.
 * `dependents(v)` is the set of nodes that become unreachable from root while v is down. It is computed by removing v and running a BFS.
@@ -39,8 +51,8 @@ Safe, bulk updating of AREDN nodes. Inspired by the "Fleet Manager … doesn't e
 * Warnings are raised when a selected node is the only path to an unselected node. Unreachable selected nodes are skipped and reported.
 
 ### Per-node upgrade steps
-1. Pre-flight: check the credential, free RAM and /tmp space, and that the image matches the board ID, using the AREDN Firmware Selector metadata (sha256).
-2. Copy the image to `/tmp` (scp -P 2222).
+1. Pre-flight: connect (trying each credential in turn), read the board name, current firmware and free RAM, resolve exactly one profile, and skip the node if it's already on the target version.
+2. Stream the image to `/tmp` over SSH (`cat >`, since there's no SFTP dependency), then run `sha256sum` on the node to confirm it.
 3. Run **`/usr/local/bin/aredn_sysupgrade`**. Plain `sysupgrade` must not be used on current AREDN.
 4. Wait for the node to drop and come back (timeout).
 5. Verify: `firmware_version` matches the target, the node's expected neighbors are back with acceptable link quality, and all of its dependents are reachable again.
@@ -79,10 +91,14 @@ Plan:
 ## Status
 * [x] Topology model and edge-inward wave planner, with tests
 * [x] sysinfo.json crawler (tested with a fake fetcher)
-* [x] Credential store skeleton
-* [x] CLI: `discover`, `plan`
-* [ ] SSH transport (asyncssh), credential probing
-* [ ] Firmware job and health checks
+* [x] Credential store, plus `creds add/list`
+* [x] CLI: `discover`, `plan`, `firmware channels/fetch/list`, `upgrade`
+* [x] Firmware catalog and downloader (2 stable + nightly, all hardware, SHA-256 verified)
+* [x] SSH transport (asyncssh, port 2222) with credential probing
+* [x] Firmware job: dry run by default, stops on first failure, soak and re-check between waves, JSONL audit log (tested against a simulated mesh)
+* [x] GitHub Actions CI (Python 3.10, 3.12, 3.13)
+* [ ] SSH host-key pinning (currently off — must fix before field use)
+* [ ] Confirm the `aredn_sysupgrade` arguments and settings-preservation behavior on 4.26.x hardware
 * [ ] Radio settings job and node-side revert agent (.ipk)
 * [ ] Web UI
 * [ ] Field test on a lab mesh (2–3 spare nodes) before any production use
