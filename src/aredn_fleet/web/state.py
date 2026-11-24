@@ -220,7 +220,10 @@ class AppState:
         self.topology = topo
         self.nodes = {n: {"firmware": i.firmware, "model": i.model, "board_id": i.board_id,
                           "api_version": i.api_version, "lat": i.lat, "lon": i.lon,
-                          "meshrf": (i.raw.get("meshrf") or {})}
+                          "meshrf": (i.raw.get("meshrf") or {}),
+                          # True when this node shares its WAN with the mesh (sysinfo reports it
+                          # on 4.26.x and the nightly; absent on older firmware).
+                          "gateway": (i.raw.get("node_details") or {}).get("mesh_gateway")}
                       for n, i in infos.items()}
         self.errors = errors
         self.root = root
@@ -267,6 +270,7 @@ class AppState:
                 "radios_stale": self.radios_stale(n),
                 "custom": custom_summary(self.overrides.get(n)),
                 "radios_read_at": (self.radios.get(n) or {}).get("read_at"),
+                "gateway": info.get("gateway"),
             })
         return {"root": self.root, "discovered_at": self.discovered_at, "nodes": nodes,
                 "links": [l.__dict__ for l in self.topology.links]}

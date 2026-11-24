@@ -156,3 +156,5 @@ dialog.wide { width: min(980px, 94vw); }
 .summary-line { font-size: 13px; margin: 4px 0; }
 
 .summary-line code { font-size: 11px; background: var(--bg); padding: 1px 4px; border-radius: 4px; }
+
+.badge.gateway { color: var(--accent); border-color: var(--accent); }

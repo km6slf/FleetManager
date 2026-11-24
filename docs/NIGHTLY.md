@@ -33,8 +33,27 @@ Source: the AREDN team's "Release Candidate – Major changes and tests" documen
 | **Wifi Signal/Scan work on all radios and in PtP/PtMP** | Possible later: signal check after radio changes. |
 | AREDNLink v0.0.1 retired | Nothing to do. |
 
-## To confirm on the bench (RC)
-- Whether a wireless change still needs a reboot. On 4.26.1.0, `node-setup`'s `wireless` case falls through to `default`. The revert script handles both cases.
-- Whether `aredn_sysupgrade` changed, and the new `/a/sysinfo` fields (per-radio info? WAN monitor state?).
-- Setting names for: multi-channel stations, DtD to WAN, internet exclusion, WAN monitor.
+## Confirmed on the bench (hAP ac lite, nightly 20261122-5e4131bf)
+- **Upgrade path unchanged:** `aredn_sysupgrade` still backs up and calls `/sbin/sysupgrade -f <backup> -q`. 4.26.1.0 → 4.26.10.0 → nightly both went through Fleet Manager.
+- **Channel list format changed.** `getConfiguration()` now returns one `channels` list; each entry has `number`, `label`, `frequency`, `widths`, and per-width `unlicensed` (`maxEIRP`, `DFS`, `NO_OUTDOOR`) and `amateur` (`maxPEP`) limits. `managedOOB` is gone. The dialog lists every channel whose `widths` include the current width, in every mesh mode, labelled `<label> [ham N dBm] [dfs, indoor, N dB]` (the unlicensed part only when `setup.globals.radio_unlicensed` is on). **Done:** `channel_table()` reads both formats and builds the same labels.
+- **Removed channels confirmed:** 48, 52, 56 and 64 are gone; 60 now only allows 5/10/20 MHz.
+- **Setting functions renamed:** `aredn.configuration` has `getSettingAsString/AsInt/AsList` and `setSettingAsString/AsList`; `setSetting` is gone. **Done:** the radio script uses `setSettingAsString || setSetting`, so it works on both.
+- **Multi-channel Mesh Station:** list setting `radioN_channels` (sorted, unique), with `radioN_channel` = the first; the list is empty when there's only one channel. Setting a single channel clears the list (now done by Fleet Manager too). Entering a non-mesh-ad-hoc mode moves channels ≤ 0 to 1.
+- **Wireless changes no longer always reboot.** In `node-setup`, a wireless change reboots only if the hardware says so; a channel change restarts `wireless` and `lqm`. The radio job already handles both.
+- **Two mesh radios:** the dialog's restriction is gone.
+- **Internet settings** (uci `aredn.@wan[0]`, applied by `node-setup`, no reboot):
+
+  | GUI | Setting | Default |
+  |---|---|---|
+  | Allow mesh to use local WAN | `mesh_to_local_wan` | 0 |
+  | DtD to WAN | `local_defaultroute` (by its position in the dialog; confirm on a second node) | 1 |
+  | LAN to local WAN | `lan_dhcp_route` | 1 |
+  | LAN to mesh WAN | `lan_to_remote_wan` | 0 |
+  | Firewall | `passthrough` (inverted) | 0 |
+  | Mesh Internet Router | `mesh_internet` | 1 |
+  | WAN monitor addresses | `monitor1`, `monitor2` | 1.1.1.1, 8.8.8.8 |
+- **sysinfo:** `node_details.mesh_gateway` = `mesh_to_local_wan`. **Done:** a "gateway" badge in the Nodes table.
+
+## Still to confirm (needs more nodes)
 - How 6 GHz shows on the OpenWrt One. Fleet Manager infers 6 GHz from frequencies at or above 5925 MHz if the node doesn't name the band.
+- How a multi-channel Mesh Station reports its current channel ("Searching") in `iw` and sysinfo.

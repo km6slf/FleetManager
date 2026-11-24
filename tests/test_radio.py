@@ -128,7 +128,9 @@ def test_change_validation():
 def test_script_is_valid_shell_and_sets_both_radios():
     s = build_apply_script([(0, "channel", "133"), (1, "mode", "off")], 2_000_000_000, 600)
     subprocess.run(["sh", "-n"], input=s, text=True, check=True)
-    assert 'c.setSetting("radio0_channel", "133")' in s and 'c.setSetting("radio1_mode", "off")' in s
+    assert 'S("radio0_channel", "133")' in s and 'S("radio1_mode", "off")' in s
+    assert "c.setSettingAsString || c.setSetting" in s
+    assert 'c.setSettingAsList("radio0_channels", [])' in s
     assert "/etc/aredn-fleet-radio" in s and "rc.local" in s
 
 
@@ -390,3 +392,45 @@ def test_only_node_settings_no_group_change():
     assert rep.results["a"].status == "unchanged" and rep.results["b"].status == "would-change"
     with pytest.raises(ValueError, match="nothing to change"):
         go(fc, clock, execute=False, changes={"a": [], "b": []})
+
+
+# Nightly/RC getConfiguration(): one channel list with widths and per-width limits
+# (shape from the bench hAP ac lite on 20261122-5e4131bf).
+RC_FIVE = [
+    {"number": 36, "frequency": 5180, "label": "36 (5180)", "widths": [5, 10, 20, 40],
+     "unlicensed": {"20": {"maxEIRP": 100}, "40": {"maxEIRP": 100}}, "amateur": {}},
+    {"number": 60, "frequency": 5300, "label": "60 (5300)", "widths": [5, 10, 20],
+     "unlicensed": {"20": {"maxEIRP": 100, "DFS": True}}, "amateur": {}},
+    {"number": 131, "frequency": 5655, "label": "131 (5655)", "widths": [5, 10, 20],
+     "unlicensed": {}, "amateur": {"20": {"maxPEP": 30}}},
+    {"number": 132, "frequency": 5660, "label": "132 (5660)", "widths": [5, 10, 20, 40, 80],
+     "unlicensed": {"20": {"maxEIRP": 100}}, "amateur": {}},
+]
+
+
+def rc_state():
+    return {"config": [
+        {"iface": "wlan0", "mode": {"mode": "mesh", "channel": 131, "channels": None, "bandwidth": 20},
+         "def": {"channel": 149, "bandwidth": 10, "band": "5GHz"}, "bws": [5, 10, 20, 40, 80],
+         "channels": RC_FIVE},
+        {"iface": "wlan1", "mode": {"mode": "wan", "channel": None, "bandwidth": None},
+         "def": {"channel": -2, "bandwidth": 10, "band": "2.4GHz"}, "bws": [10, 20],
+         "channels": [{"number": 1, "frequency": 2412, "label": "1 (2412)", "widths": [5, 10, 20],
+                       "unlicensed": {}, "amateur": {}}]},
+    ]}
+
+
+def test_rc_channel_list_format_is_grouped_by_width_like_the_dialog():
+    i = parse_radio_inventory(json.dumps(rc_state()), "multi-mesh")
+    r = i.radios[0]
+    assert r.band == "5GHz" and r.channel == 131 and r.bandwidth == 20
+    assert [c["number"] for c in r.channel_options("mesh", 20)] == [36, 60, 131, 132]
+    assert [c["number"] for c in r.channel_options("meshsta", 40)] == [36, 132]
+    assert [c["number"] for c in r.channel_options("mesh", 80)] == [132]
+    assert r.label(131, 20) == "131 (5655) [ham 30 dBm]"
+    assert r.frequency(132, 80) == 5660
+    assert i.radios[1].channel_options("mesh", 20)[0]["number"] == 1
+    # with unlicensed channels enabled, the dialog adds Part 15 limits
+    u = parse_radio_inventory(json.dumps(rc_state()), "multi-mesh", unlicensed=True).radios[0]
+    assert u.label(60, 20) == "60 (5300) [dfs, 100 dB]"
+    assert u.label(131, 20) == "131 (5655) [ham 30 dBm]"

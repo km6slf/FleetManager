@@ -60,6 +60,8 @@ RADIO_STATE_CMD = (
     "ucode -e 'import * as r from \"aredn.radios\"; "
     "printf(\"%J\", { config: r.getConfiguration() });'"
 )
+# Whether the node shows unlicensed (Part 15) limits next to channels in its dialog.
+UNLICENSED_CMD = "uci -q -c /etc/config.mesh get setup.globals.radio_unlicensed"
 # The dialog code that forbids two mesh radios, present on firmware that can't do it.
 CAPS_CMD = ("f=/app/main/status/e/radio-and-antenna.ut; "
             "if [ ! -f $f ]; then echo unknown; "
@@ -86,12 +88,52 @@ def band_label(band: str) -> str:
     return f"{num} {unit}"
 
 
+def channel_table(radio: dict[str, Any], unlicensed: bool = False) -> dict[str, list[dict[str, Any]]]:
+    """Width -> channel options, from either firmware's ``getConfiguration()`` format.
+
+    * 4.26.x: ``channels`` is ``{width: [{number, label, frequency}]}``.
+    * Nightly/RC (from 20261012): ``channels`` is one list of
+      ``{number, label, frequency, widths, unlicensed: {width: limits}, amateur: {width: limits}}``.
+      The node's dialog lists every channel whose ``widths`` include the width, and labels it
+      ``<label> [ham <maxPEP> dBm] [dfs, indoor, <maxEIRP> dB]`` (the unlicensed part only when
+      unlicensed channels are enabled). This builds the same labels.
+    """
+    chans = radio.get("channels") or {}
+    if isinstance(chans, dict):
+        return {str(bw): [{"number": int(c["number"]), "label": str(c.get("label", c["number"])),
+                           "frequency": int(c.get("frequency") or 0)}
+                          for c in lst if isinstance(c, dict)]
+                for bw, lst in chans.items()}
+    table: dict[str, list[dict[str, Any]]] = {}
+    widths = [int(b) for b in (radio.get("bws") or [])] or sorted(
+        {int(w) for c in chans if isinstance(c, dict) for w in (c.get("widths") or [])})
+    for bw in widths:
+        opts = []
+        for c in chans:
+            if not isinstance(c, dict) or bw not in [int(w) for w in (c.get("widths") or [])]:
+                continue
+            label = str(c.get("label", c["number"]))
+            ham = ((c.get("amateur") or {}).get(str(bw)) or {})
+            if ham.get("maxPEP"):
+                label += f" [ham {ham['maxPEP']} dBm]"
+            if unlicensed:
+                u = ((c.get("unlicensed") or {}).get(str(bw)) or {})
+                limits = (["dfs"] if u.get("DFS") else []) + (["indoor"] if u.get("NO_OUTDOOR") else []) \
+                    + ([f"{u['maxEIRP']} dB"] if u.get("maxEIRP") else [])
+                if limits:
+                    label += f" [{', '.join(limits)}]"
+            opts.append({"number": int(c["number"]), "label": label,
+                         "frequency": int(c.get("frequency") or 0)})
+        table[str(bw)] = opts
+    return table
+
+
 def band_of(radio: dict[str, Any]) -> str:
     """The radio's band as the node reports it ("2.4GHz", "5GHz", "900MHz", ...), else from frequency."""
     b = str(((radio.get("def") or {}).get("band") or "")).replace(" ", "")
     if b:
         return b
-    for chans in (radio.get("channels") or {}).values():
+    for chans in channel_table(radio).values():
         for c in chans:
             f = c.get("frequency") if isinstance(c, dict) else None
             if f:
@@ -160,7 +202,7 @@ def _int_or_none(v: Any) -> int | None:
         return None
 
 
-def parse_radio_inventory(raw: str, caps: str = "unknown") -> NodeRadios:
+def parse_radio_inventory(raw: str, caps: str = "unknown", unlicensed: bool = False) -> NodeRadios:
     """Parse RADIO_STATE_CMD output. Keys and non-mesh SSIDs are deliberately dropped."""
     data = json.loads(raw)
     radios = []
@@ -168,10 +210,7 @@ def parse_radio_inventory(raw: str, caps: str = "unknown") -> NodeRadios:
         if not isinstance(r, dict):
             continue
         m = r.get("mode") or {}
-        chans = {str(bw): [{"number": int(c["number"]), "label": str(c.get("label", c["number"])),
-                            "frequency": int(c.get("frequency") or 0)}
-                           for c in lst if isinstance(c, dict)]
-                 for bw, lst in (r.get("channels") or {}).items()}
+        chans = channel_table(r, unlicensed)
         oob = r.get("managedOOB") or []
         radios.append(RadioInfo(
             index=i, iface=str(r.get("iface") or f"wlan{i}"), band=band_of(r),
@@ -188,7 +227,11 @@ def parse_radio_inventory(raw: str, caps: str = "unknown") -> NodeRadios:
 async def read_node_radios(session: NodeSession) -> NodeRadios:
     raw = (await session.run(RADIO_STATE_CMD)).stdout
     caps = (await session.run(CAPS_CMD)).stdout
-    inv = parse_radio_inventory(raw, caps)
+    try:
+        unl = (await session.run(UNLICENSED_CMD)).stdout.strip() == "1"
+    except Exception:  # noqa: BLE001 - only affects labels
+        unl = False
+    inv = parse_radio_inventory(raw, caps, unl)
     try:
         inv.firmware = (await session.run("cat /etc/mesh-release")).stdout.strip().splitlines()[0]
     except (IndexError, AttributeError):
@@ -404,9 +447,17 @@ def build_apply_script(sets: list[tuple[int, str, str]], apply_at: int, revert_a
     for _, k, v in sets:  # values are whitelisted or numeric; keep it that way
         if not re.fullmatch(r"[A-Za-z0-9:._-]+", v) or not re.fullmatch(r"[a-z_]+", k):
             raise ValueError(f"refusing unsafe setting {k}={v!r}")
-    ucode_sets = " ".join(f'c.setSetting("radio{i}_{k}", "{v}");' for i, k, v in sets)
-    ucode = ("import * as c from \"aredn.configuration\"; c.prepareChanges(); "
-             f"{ucode_sets} c.saveSettings(); c.commitChanges();")
+    # 4.26.x has setSetting(); the nightly/RC renamed it setSettingAsString() and added list
+    # settings. Setting a channel clears radioN_channels (multi-channel Mesh Station), as the
+    # node's own dialog does.
+    parts = []
+    for i, k, v in sets:
+        parts.append(f'S("radio{i}_{k}", "{v}");')
+        if k == "channel":
+            parts.append(f'if (c.setSettingAsList) c.setSettingAsList("radio{i}_channels", []);')
+    ucode = ("import * as c from \"aredn.configuration\"; "
+             "const S = c.setSettingAsString || c.setSetting; c.prepareChanges(); "
+             f"{' '.join(parts)} c.saveSettings(); c.commitChanges();")
     P = PERSIST_DIR
     return f"""#!/bin/sh
 # Generated by aredn-fleet. Applies radio settings at a set time; reverts them

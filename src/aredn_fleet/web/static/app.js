@@ -92,6 +92,7 @@ function renderNodes() {
       <td class="chk"><input type="checkbox" ${sel ? "checked" : ""} tabindex="-1"></td>
       <td><b>${esc(n.name)}</b> ${n.name === state.topo.root ? '<span class="badge root">this computer</span>' : ""}
           ${n.reachable ? "" : '<span class="badge failed">unreachable</span>'}
+          ${n.gateway ? '<span class="badge gateway" title="Shares its internet (WAN) connection with the mesh">gateway</span>' : ""}
           ${n.custom ? `<span class="badge custom" data-edit="${esc(n.name)}" title="${esc(n.custom.text + (n.custom.note ? " — " + n.custom.note : ""))}">custom</span>` : ""}</td>
       <td class="model" title="${esc(n.model)}">${esc(n.model)}</td>
       <td class="${old ? "fw-old" : ""}" title="${old ? "older than " + esc(latest) : ""}">${esc(n.firmware)}</td>
