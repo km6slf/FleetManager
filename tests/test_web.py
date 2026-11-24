@@ -113,3 +113,22 @@ def test_firmware_local_and_job_flow(client, tmp_path):
 def test_static_assets_served(client):
     assert "Fleet Manager" in client.get("/").text
     assert client.get("/static/app.js").status_code == 200
+
+
+def test_starts_without_console_streams(tmp_path):
+    """A windowed Windows exe has sys.stdout/stderr = None; startup must survive that."""
+    import subprocess
+    import sys
+    code = (
+        "import sys; sys.stdout = None; sys.stderr = None\n"
+        "from aredn_fleet.desktop import ensure_std_streams, start_server, _free_port\n"
+        "ensure_std_streams()\n"
+        "s, t = start_server('127.0.0.1', _free_port(), 'tok')\n"
+        "s.should_exit = True; t.join(5)\n"
+        "open(sys.argv[1], 'w').write('ok')\n"
+    )
+    marker = tmp_path / "ok"
+    env = {**__import__("os").environ, "AREDN_FLEET_HOME": str(tmp_path / "home")}
+    subprocess.run([sys.executable, "-c", code, str(marker)], env=env, timeout=60, check=True)
+    assert marker.read_text() == "ok"
+    assert (tmp_path / "home/config/logs/fleet-manager.log").exists()

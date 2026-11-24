@@ -44,8 +44,12 @@ jobs:
       - name: Self-test the bundle
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath dist\AREDN-Fleet-Manager\AREDN-Fleet-Manager.exe -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow
+          # Launch like a double-click (no inherited console streams).
+          $env:FLEET_SELFTEST_REPORT = "$PWD\selftest.txt"
+          $p = Start-Process -FilePath dist\AREDN-Fleet-Manager\AREDN-Fleet-Manager.exe -ArgumentList "--selftest" -Wait -PassThru
+          if (Test-Path selftest.txt) { Get-Content selftest.txt }
           if ($p.ExitCode -ne 0) { throw "bundle self-test failed ($($p.ExitCode))" }
+          if (-not (Select-String -Path selftest.txt -Pattern "selftest ok" -Quiet)) { throw "self-test did not report ok" }
 
       - name: Portable zip
         shell: pwsh

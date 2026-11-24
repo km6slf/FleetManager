@@ -1,5 +1,6 @@
 # PyInstaller spec for the AREDN Fleet Manager desktop app (one-folder build).
 # Build:  pyinstaller packaging/windows/fleet-manager.spec --noconfirm
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
@@ -12,11 +13,18 @@ binaries = []
 hiddenimports = (collect_submodules("aredn_fleet")
                  + collect_submodules("uvicorn")
                  + collect_submodules("keyring.backends"))
-for pkg in ("webview", "asyncssh"):
-    d, b, h = collect_all(pkg)
+# webview's Windows backend runs on .NET via pythonnet (clr / clr_loader); bundle
+# their managed DLLs too, or the window fails to open on a machine without them.
+for pkg in ("webview", "asyncssh", "pythonnet", "clr_loader"):
+    try:
+        d, b, h = collect_all(pkg)
+    except Exception:  # not installed on this platform (e.g. pythonnet on Linux)
+        continue
     datas += d
     binaries += b
     hiddenimports += h
+if sys.platform == "win32":
+    hiddenimports += ["clr", "webview.platforms.winforms", "webview.platforms.edgechromium"]
 
 a = Analysis(
     [str(HERE / "launcher.py")],

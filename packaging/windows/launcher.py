@@ -9,7 +9,17 @@ import sys
 
 
 def selftest() -> int:
+    """Run the startup path exactly as a double-clicked windowed exe would."""
     import json
+    import os
+
+    # A double-clicked GUI build has no console: stdout/stderr are None.
+    # Recreate that so this test catches crashes the real launch would hit.
+    report = os.environ.get("FLEET_SELFTEST_REPORT")
+    sys.stdout = None
+    sys.stderr = None
+    from aredn_fleet.desktop import ensure_std_streams
+    ensure_std_streams()
     import secrets
     import urllib.request
 
@@ -27,8 +37,15 @@ def selftest() -> int:
         import asyncssh  # noqa: F401  (needed for node access)
         import keyring  # noqa: F401
         import webview  # noqa: F401
+        if sys.platform == "win32":
+            # Load the real window backend (.NET + WebView2) the way a launch would.
+            import webview.platforms.winforms  # noqa: F401
         ok = "Fleet Manager" in page and len(js) > 1000 and info.get("version")
-        print("selftest", "ok" if ok else "FAILED", info)
+        msg = f"selftest {'ok' if ok else 'FAILED'} {info}"
+        print(msg)
+        if report:
+            with open(report, "w") as f:
+                f.write(msg + "\n")
         return 0 if ok else 1
     finally:
         server.should_exit = True
