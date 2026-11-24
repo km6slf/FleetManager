@@ -66,18 +66,18 @@ How AREDN 4.26 stores and applies radio settings (read from a bench node):
 * Settings live in `/etc/config.mesh/setup` (uci `setup.globals`): `radioN_mode`, `radioN_channel`, `radioN_bandwidth`, `radioN_peer`, `radioN_txpower`, `radioN_distance`.
 * The modes are `mesh` (ad-hoc), `meshap` (PtMP AP), `meshptp`, `meshsta` (PtMP station), `lan`, `wan` and `off`.
 * The web UI applies changes through the ucode module `aredn.configuration`: `prepareChanges()` → `setSetting()` → `saveSettings()` → `commitChanges()`. The last step runs `node-setup` and then `restart-services`, and marks `/tmp/reboot-required` if a reboot is needed. The fleet manager uses the **same calls**.
-* `aredn.radios.getCommonConfiguration()` gives the hardware's channel list for each width, and the manager validates requested changes against it.
+* `aredn.radios.getConfiguration()` gives each radio's channel list for each width (the same data the node's dialog uses), and the manager validates every requested change against it. See **Radios (per band)** below.
 * `node-setup` derives the mesh SSID from the width (`AREDN-<bw>-v3`); for PtMP and PtP it also uses the channel. Nodes on different widths can't link at all.
 
 The job (`aredn-fleet radio`):
-1. **Preflight (read-only):** read the radio state and channel table over SSH, refuse channel/width pairs the hardware doesn't support, and refuse if a node's clock is more than 20 s off. Dry run stops here.
+1. **Preflight (read-only):** re-read every radio over SSH, refuse anything the node's own dialog wouldn't allow, and refuse if a node's clock is more than 20 s off. Dry run stops here.
 2. **Arm:** upload a script to every node in the cluster.
    * The script backs up `setup` to flash (`/etc/aredn-fleet-radio/`) and installs a boot hook in `/etc/rc.local`, which is in the sysupgrade keep list.
    * It sleeps until a **shared switch time**, applies the change through `aredn.configuration`, and reboots if AREDN flags that a reboot is required.
    * A revert timer, counted from boot so it doesn't depend on NTP, **restores the backup and reboots unless the change is confirmed** within `revert_after` (default 600 s).
    * If arming fails on any node, the others are cancelled before the switch.
    * Preflight refuses nodes that don't run `rc.local` at boot.
-3. **Verify:** poll every node's `meshrf.channel/chanbw` until it reports the new values.
+3. **Verify:** for each changed radio, `iw dev <iface> info` must show the new frequency and interface type, and the node's RF neighbours must be back.
 4. **Confirm all or none:** if every node verifies, touch `confirmed` on each. Otherwise confirm none, and the whole cluster reverts together instead of splitting.
 * Clusters are separated by DTD and tunnel links and are changed one at a time. The job stops after the first cluster that fails.
 * It warns when an unselected RF neighbor would lose its link.
@@ -180,6 +180,6 @@ The job (`aredn-fleet radio`):
 * [ ] Package the revert script as the optional .ipk agent
 * [x] GUI (desktop window + headless serve), token auth, background jobs with stop; API tests; bundle self-test
 * [x] Windows installer + portable zip built in CI
-* [ ] First CI build verified on a real Windows machine
+* [x] CI build installed and run on a real Windows machine (after fixing the no-console launch crash)
 * [ ] Linux .deb (desktop + headless service)
 * [ ] Field test on a lab mesh (2–3 spare nodes) before any production use
