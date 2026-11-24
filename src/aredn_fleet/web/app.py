@@ -422,9 +422,6 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
             async def one(n):
                 nonlocal ok
-                if why := old_firmware_reason(n):
-                    job.log(why, "warn")
-                    return
                 async with sem:
                     try:
                         s = await connect(n)
@@ -437,18 +434,29 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                         return
                     state.set_radios(n, inv)
                     ok += 1
-                    job.log(f"{n}: {describe(inv)}", "ok")
+                    job.log(f"{n}: {describe(inv)}"
+                            + (" (older firmware: shown only; upgrade to change radios)" if inv.legacy else ""), "ok")
 
             job.log(f"Reading radio details from {len(req.nodes)} node(s) over SSH…")
             await asyncio.gather(*(one(n) for n in req.nodes))
             state.save_creds(creds)
             job.log(f"Read {ok} of {len(req.nodes)} node(s)", "ok" if ok == len(req.nodes) else "warn")
+            if not ok:
+                raise RuntimeError("no radios read; see the Activity log")
         return start("radios", f"Read radios ({len(req.nodes)} nodes)", False, body)
 
     @app.post("/api/radio/options")
     async def radio_opts(req: NodesReq):
-        stale = {n for n in req.nodes if state.radios_stale(n)}
-        return radio_options(state.radios, req.nodes, stale)
+        old = [n for n in req.nodes if old_firmware_reason(n)]
+        usable = [n for n in req.nodes if n not in old]
+        stale = {n for n in usable if state.radios_stale(n)}
+        out = radio_options(state.radios, usable, stale)
+        # Older nodes can still be read (view only), so offer Read radios for them too.
+        out["missing"] = list(out.get("missing") or []) + [
+            n for n in old if n not in state.radios or state.radios_stale(n)]
+        out["too_old"] = [{"node": n, "firmware": (state.nodes.get(n) or {}).get("firmware", "")}
+                          for n in old]
+        return out
 
     @app.post("/api/radio")
     async def radio(req: RadioReq):

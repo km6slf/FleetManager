@@ -69,6 +69,42 @@ RADIO_STATE_CMD = (
     "push(modes, m); } "
     "printf(\"%J\", { config: c, modes: modes });'"
 )
+# Older (Lua web UI, 3.23 and earlier) firmware: ask the way its Basic Setup page does.
+# Mesh radio from /etc/config.mesh/_setup (wifi_enable/channel/chanbw/ssid), its channel list from
+# aredn.hardware.get_rfchannels (iwinfo freqlist, with the M9/M3 frequency shifts) and widths from
+# get_rfbandwidths. A second radio only gets its purpose (LAN hotspot / WAN client), no channels.
+# Printed in getConfiguration()'s shape so the same parser reads it. Keys are never printed.
+LEGACY_RADIO_CMD = r"""lua -e '
+local hw = require("aredn.hardware")
+local json = require("luci.jsonc")
+local s = {}
+local f = io.open("/etc/config.mesh/_setup")
+if f then for l in f:lines() do local k, v = l:match("^%s*([%w_]+)%s*=%s*(.-)%s*$") if k then s[k] = v end end f:close() end
+local phys = 0
+local p = io.popen("ls /sys/class/ieee80211 2>/dev/null")
+for _ in p:lines() do phys = phys + 1 end p:close()
+local iface = hw.get_iface_name("wifi")
+if not iface or iface == "" or not iface:match("^wlan") then iface = "wlan0" end
+local bws = hw.get_rfbandwidths(iface) or {}
+local chans = hw.get_rfchannels(iface) or {}
+table.sort(chans, function(a, b) return a.number < b.number end)
+local bytbw = {}
+for _, bw in ipairs(bws) do bytbw[tostring(bw)] = chans end
+local mode = "off"
+if s.wifi_enable == "1" then mode = "mesh"
+elseif phys == 1 and s.wifi2_enable == "1" then mode = "lan"
+elseif phys == 1 and s.wifi3_enable == "1" then mode = "wan" end
+local out = { { iface = iface, bws = bws, channels = bytbw,
+  mode = { mode = mode, channel = tonumber(s.wifi_channel), bandwidth = tonumber(s.wifi_chanbw),
+           ssid = (mode == "mesh") and s.wifi_ssid or nil } } }
+if phys > 1 then
+  local m2 = (s.wifi2_enable == "1") and "lan" or (s.wifi3_enable == "1") and "wan" or "off"
+  out[2] = { iface = (iface == "wlan0") and "wlan1" or "wlan0", bws = {}, channels = {}, mode = { mode = m2 } }
+end
+print(json.stringify({ config = out, modes = {}, legacy = true }))
+'"""
+# Which web UI generation the node runs: ucode (3.25.5 and later) or the older Lua one.
+RADIO_UI_CMD = "[ -d /app/main ] && echo ucode || echo lua"
 # Whether the node shows unlicensed (Part 15) limits next to channels in its dialog.
 UNLICENSED_CMD = "uci -q -c /etc/config.mesh get setup.globals.radio_unlicensed"
 # The dialog code that forbids two mesh radios, present on firmware that can't do it.
@@ -197,20 +233,21 @@ class NodeRadios:
     multi_mesh: bool | None          # None = couldn't tell
     read_at: float = field(default_factory=time.time)
     firmware: str = ""               # firmware the node ran when read (channel lists can change)
+    legacy: bool = False             # read from older (Lua UI) firmware: view only, no changes
 
     def by_band(self, band: str) -> RadioInfo | None:
         return next((r for r in self.radios if r.band == band), None)
 
     def to_json(self) -> dict[str, Any]:
         return {"radios": [asdict(r) for r in self.radios], "multi_mesh": self.multi_mesh,
-                "read_at": self.read_at, "firmware": self.firmware}
+                "read_at": self.read_at, "firmware": self.firmware, "legacy": self.legacy}
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "NodeRadios":
         known = set(RadioInfo.__dataclass_fields__)
         return cls([RadioInfo(**{k: v for k, v in r.items() if k in known}) for r in d.get("radios", [])],
                    d.get("multi_mesh"),
-                   d.get("read_at", 0), d.get("firmware", ""))
+                   d.get("read_at", 0), d.get("firmware", ""), d.get("legacy", False))
 
 
 def _supported_modes(m: Any) -> list[str] | None:
@@ -254,6 +291,16 @@ def parse_radio_inventory(raw: str, caps: str = "unknown", unlicensed: bool = Fa
 
 
 async def read_node_radios(session: NodeSession) -> NodeRadios:
+    legacy = "lua" in (await session.run(RADIO_UI_CMD)).stdout
+    if legacy:
+        inv = parse_radio_inventory((await session.run(LEGACY_RADIO_CMD, timeout=60)).stdout,
+                                    "single-mesh")
+        inv.legacy = True
+        try:
+            inv.firmware = (await session.run("cat /etc/mesh-release")).stdout.strip().splitlines()[0]
+        except (IndexError, AttributeError):
+            pass
+        return inv
     raw = (await session.run(RADIO_STATE_CMD)).stdout
     caps = (await session.run(CAPS_CMD)).stdout
     try:

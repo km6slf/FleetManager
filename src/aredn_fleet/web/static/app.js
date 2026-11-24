@@ -215,10 +215,16 @@ async function loadRadioPanel() {
   if (!nodes.length) {
     radioOpts = null;
     $("#radio-missing").classList.add("hidden");
+    $("#radio-old").classList.add("hidden");
     box.innerHTML = '<p class="hint">Select nodes to see their radios.</p>';
     return;
   }
   radioOpts = await api("/api/radio/options", { body: { nodes } });
+  const old = radioOpts.too_old || [];
+  $("#radio-old").classList.toggle("hidden", !old.length);
+  $("#radio-old").innerHTML = old.length
+    ? `Radio changes need firmware 3.25.5 or later. Shown on the Mesh tab but left alone here: ${old.map((o) => `<b>${esc(o.node)}</b> (${esc(o.firmware || "unknown")})`).join(", ")}. Press <b>Read radios</b> to see their current radio; upgrade (the Upgrade card picks the last release each node can run) to change it.`
+    : "";
   const miss = radioOpts.missing, stale = radioOpts.stale || [];
   const fresh = miss.filter((n) => !stale.includes(n));
   $("#radio-missing").classList.toggle("hidden", !miss.length);
@@ -227,6 +233,10 @@ async function loadRadioPanel() {
     fresh.length ? `Radio details not read yet for ${list(fresh)}.` : "",
     stale.length ? `Out of date after a firmware change for ${list(stale)}.` : "",
   ].filter(Boolean).join(" ");
+  if (!radioOpts.bands.length && old.length === nodes.length) {
+    box.innerHTML = "";
+    return;
+  }
   if (!radioOpts.bands.length) {
     box.innerHTML = '<p class="hint">No radio details for the selected nodes yet. Press <b>Read radios</b> (logs in over SSH, read-only).</p>';
     return;
@@ -531,7 +541,7 @@ $("#btn-read-settings").addEventListener("click", () => guarded(async () => {
     ? [...settingsInfo.missing, ...settingsInfo.stale] : needSelection();
   const job = await api("/api/settings/read", { body: { nodes } });
   toast("Reading settings…");
-  followJob(job.id, { quiet: true, onDone: () => loadSettingsPanel() });
+  followJob(job.id, { onDone: () => loadSettingsPanel() });
 }));
 $("#btn-se-dry").addEventListener("click", () => guarded(async () => {
   followJob((await api("/api/settings", { body: settingsBody(false) })).id, { onDone: () => loadSettingsPanel() });
