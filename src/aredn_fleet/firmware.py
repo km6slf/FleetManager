@@ -121,7 +121,8 @@ class Catalog:
     def versions(self) -> dict[str, str]:
         return parse_versions(self.get(self.base + "afs/www/config.js").decode())
 
-    def release(self, chan: Channel, profile_ids: Iterable[str] | None = None) -> Release:
+    def release(self, chan: Channel, profile_ids: Iterable[str] | None = None,
+                boards: Iterable[str] | None = None) -> Release:
         overview = self._json(f"afs/www/{chan.data_dir}/overview.json")
         wanted = set(profile_ids) if profile_ids else None
         entries = [p for p in overview["profiles"] if wanted is None or p["id"] in wanted]
@@ -139,6 +140,9 @@ class Catalog:
 
         with ThreadPoolExecutor(self.workers) as pool:
             profiles = {p.id: p for p in pool.map(load, entries)}
+        if boards:
+            want = set(boards)
+            profiles = {k: p for k, p in profiles.items() if want & set(p.supported_devices)}
         return Release(chan.name, overview.get("release", chan.version), profiles)
 
 

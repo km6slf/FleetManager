@@ -60,16 +60,25 @@ Safe, bulk updating of AREDN nodes. Inspired by the "Fleet Manager … doesn't e
 7. On failure, stop the rollout. Do **not** continue inward past a failed node.
 
 ## Radio settings (channel / width / mode)
-This is a different problem from firmware. Changing an RF node's channel cuts its RF links to every neighbor still on the old channel, so working edge-inward one node at a time would strand each node as it goes.
+Changing an RF node's channel, width, or mode cuts its RF links to every neighbor still on the old settings, so working edge-inward one node at a time would strand each node as it goes. Instead, each **RF cluster** switches together.
 
-Plan:
-1. Group the selected nodes into **RF clusters**: connected components that use only RF links, with DTD and tunnel links between clusters.
-2. Within a cluster, **stage** the new settings on every node, applying edge-inward exactly as for firmware, but *don't* commit them yet.
-3. **Synchronized commit:** every node in the cluster applies the change at the same scheduled time (all nodes keep NTP time on the mesh).
-4. **Dead-man revert:** each node arms a revert timer (e.g. 10 min). If it can't see its expected neighbors on the new settings, it rolls back on its own. This runs on the node, through the agent or a pushed script.
-5. The controller verifies the whole cluster on the new settings and then disarms the revert timers.
-* Changing the operating mode (mesh / PtMP / PtP / station, etc.) follows the same staged, timed process, with extra checks for modes that change which node is the parent.
-* Open item: confirm, per firmware version, which config keys and apply command AREDN 4.26.x uses for channel, width, and mode. Read the node's own setup code before writing anything.
+How AREDN 4.26 stores and applies radio settings (read from a bench node):
+* Settings live in `/etc/config.mesh/setup` (uci `setup.globals`): `radioN_mode`, `radioN_channel`, `radioN_bandwidth`, `radioN_peer`, `radioN_txpower`, `radioN_distance`.
+* The modes are `mesh` (ad-hoc), `meshap` (PtMP AP), `meshptp`, `meshsta` (PtMP station), `lan`, `wan` and `off`.
+* The web UI applies changes through the ucode module `aredn.configuration`: `prepareChanges()` → `setSetting()` → `saveSettings()` → `commitChanges()`. The last step runs `node-setup` and then `restart-services`, and marks `/tmp/reboot-required` if a reboot is needed. The fleet manager uses the **same calls**.
+* `aredn.radios.getCommonConfiguration()` gives the hardware's channel list for each width, and the manager validates requested changes against it.
+* `node-setup` derives the mesh SSID from the width (`AREDN-<bw>-v3`); for PtMP and PtP it also uses the channel. Nodes on different widths can't link at all.
+
+The job (`aredn-fleet radio`):
+1. **Preflight (read-only):** read the radio state and channel table over SSH, refuse channel/width pairs the hardware doesn't support, and refuse if a node's clock is more than 20 s off. Dry run stops here.
+2. **Arm:** upload a script to every node in the cluster that backs up `setup`, sleeps until a **shared switch time**, and applies the change through `aredn.configuration`. It then waits `revert_after` (default 600 s) and **restores the backup unless `/tmp/aredn-fleet-radio/confirmed` exists**. If arming fails on any node, the others are cancelled before the switch.
+3. **Verify:** poll every node's `meshrf.channel/chanbw` until it reports the new values.
+4. **Confirm all or none:** if every node verifies, touch `confirmed` on each. Otherwise confirm none, and the whole cluster reverts together instead of splitting.
+* Clusters are separated by DTD and tunnel links and are changed one at a time. The job stops after the first cluster that fails.
+* It warns when an unselected RF neighbor would lose its link.
+* Known limitations:
+  * If a confirm fails partway through, the nodes already confirmed stay changed.
+  * A change that needs a reboot would wipe `/tmp` and with it the revert timer. The script logs `reboot-required`; this still needs testing on the bench.
 
 ## Field findings — bench node (MikroTik hAP ac lite, AREDN 4.26.1.0)
 * Board name is `mikrotik,routerboard-952ui-5ac2nd` (from `/tmp/sysinfo/board_name`) and the target is `ath79/mikrotik`.
@@ -89,7 +98,8 @@ Plan:
 * Routing: `babeld` runs with a control socket at `/var/run/babel.sock`, and `socat` is installed. `arednlink` handles host and service distribution.
 * The web UI is server-side ucode (`uhttpd -o /a -O /app/root.ut`). Library code is in `/usr/share/ucode/aredn/` (`configuration.uc`, `radios.uc`, `babel.uc`, `hardware.uc`).
 * The node also runs telnet. Note this for the security section.
-* Open questions: the key names in `/etc/config.mesh/setup` for channel, width and mode, and the apply path after a change. Recon pass 2 reads `configuration.uc`, `radios.uc` and the UI's radio handlers.
+* **sysinfo moved:** `/cgi-bin/sysinfo.json` now returns a 307 redirect to `/a/sysinfo`. Discovery requests `/a/sysinfo` first and falls back to the old path.
+* Babel's control socket (`echo dump | socat - UNIX-CONNECT:/var/run/babel.sock`) lists interfaces, neighbors and routes with their next hops. This can give exact hop paths without traceroute (planned).
 
 ## Credentials
 * Credentials are kept in an ordered list (keys before passwords), and the inventory records which one worked for each node.
@@ -120,6 +130,8 @@ Plan:
 * [x] SSH host-key pinning (TOFU + pin; keys confirmed to persist across sysupgrade)
 * [x] `aredn_sysupgrade` arguments and settings preservation confirmed from source on 4.26.1.0
 * [ ] First real upgrade on the bench node (4.26.1.0 → 4.26.10.0)
-* [ ] Radio settings job and node-side revert agent (.ipk)
+* [x] Radio settings job (synchronized switch per RF cluster, on-node auto-revert via pushed script; simulated-cluster tests)
+* [ ] Radio job on the bench node (needs 2 nodes for a real link test)
+* [ ] Package the revert script as the optional .ipk agent
 * [ ] Web UI
 * [ ] Field test on a lab mesh (2–3 spare nodes) before any production use

@@ -75,7 +75,7 @@ def cmd_fw_fetch(args) -> int:
     kinds = ["sysupgrade"] + (["factory"] if args.include_factory else [])
     rc = 0
     for chan in chans:
-        rel = cat.release(chan, args.profiles)
+        rel = cat.release(chan, args.profiles, args.board)
         print(f"{chan.name} {rel.version}: {len(rel.profiles)} hardware profiles", flush=True)
         if args.metadata_only:
             store.write_manifest(rel)
@@ -170,6 +170,53 @@ def cmd_upgrade(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- radio
+
+def cmd_radio(args) -> int:
+    from .jobs.radio import (RadioChange, RadioConfig, cluster_warnings, rf_clusters,
+                             run_radio_change)
+    from .jobs.upgrade import AuditLog
+    from .transport import connect
+
+    topo = _load_snapshot(Path(args.snapshot))
+    selected = set(args.nodes or topo.nodes)
+    change = RadioChange(args.channel, args.width, args.mode, args.peer)
+    change.validate()
+    for w in cluster_warnings(topo, selected):
+        print("WARNING:", w)
+    clusters = [sorted(c & selected) for c in rf_clusters(topo, selected)]
+    print(f"Change: {change}")
+    for i, c in enumerate(clusters, 1):
+        print(f"RF cluster {i}: {', '.join(c)} (switch together)")
+    if args.execute and not args.yes:
+        if input("Type 'switch' to arm the change: ").strip() != "switch":
+            print("aborted")
+            return 1
+
+    creds = CredentialStore.load(CREDS)
+
+    async def sysinfo(node):
+        try:
+            return await asyncio.to_thread(http_fetch, node, 8.0)
+        except Exception:  # noqa: BLE001
+            return None
+
+    cfg = RadioConfig(lead_seconds=args.lead, revert_after=args.revert_after)
+    log = AuditLog(Path(args.audit) if args.audit else None)
+    rc = 0
+    for c in clusters:
+        rep = asyncio.run(run_radio_change(c, change, lambda n: connect(n, creds), sysinfo, cfg,
+                                           execute=args.execute, log=log))
+        for r in rep.results.values():
+            print(f"[{r.status:12}] {r.node:24} {r.before:34} {r.detail}")
+        print(f"-> {'CONFIRMED' if rep.confirmed else rep.reason}")
+        if args.execute and not rep.confirmed:
+            rc = 1
+            break  # don't touch further clusters after a failure
+    creds.save(CREDS)
+    return rc
+
+
 # ---------------------------------------------------------------- main
 
 def _plan_args(p):
@@ -207,6 +254,8 @@ def main(argv: list[str] | None = None) -> int:
     f = fw.add_parser("fetch", help="download images for every hardware profile (or --profiles)")
     _fw_source_args(f)
     f.add_argument("--profiles", nargs="*", help="limit to these profile ids")
+    f.add_argument("--board", nargs="*", help="only hardware matching these OpenWrt board names, "
+                   "e.g. mikrotik,routerboard-952ui-5ac2nd (cat /tmp/sysinfo/board_name on a node)")
     f.add_argument("--include-factory", action="store_true", help="also fetch first-install images")
     f.add_argument("--metadata-only", action="store_true", help="catalog only, no image downloads")
     f.add_argument("--workers", type=int, default=4)
@@ -234,6 +283,22 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--execute", action="store_true")
     u.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     u.set_defaults(func=cmd_upgrade)
+
+    ra = sub.add_parser("radio", help="change mesh channel/width/mode per RF cluster, with "
+                        "auto-revert (dry run unless --execute)")
+    ra.add_argument("snapshot")
+    ra.add_argument("--nodes", nargs="*", help="selected nodes (default: all)")
+    ra.add_argument("--channel", type=int)
+    ra.add_argument("--width", type=int, help="channel width in MHz (5, 10, 20, ...)")
+    ra.add_argument("--mode", choices=["mesh", "meshap", "meshptp", "meshsta"])
+    ra.add_argument("--peer", help="peer MAC for meshptp")
+    ra.add_argument("--lead", type=float, default=90, help="seconds from arming to the switch")
+    ra.add_argument("--revert-after", type=int, default=600,
+                    help="nodes revert unless confirmed within this many seconds of the switch")
+    ra.add_argument("--audit", default="aredn-fleet-audit.jsonl")
+    ra.add_argument("--execute", action="store_true")
+    ra.add_argument("--yes", action="store_true")
+    ra.set_defaults(func=cmd_radio)
 
     args = p.parse_args(argv)
     return args.func(args)

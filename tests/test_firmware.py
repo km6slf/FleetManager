@@ -105,3 +105,10 @@ def test_match_profile_board_name_wins():
     assert [p.id for p in match_profile(rel, board_name="ubnt,rocket-m")] == ["ubnt_rocket-m"]
     assert [p.id for p in match_profile(rel, model="GL.iNet GL-MT1300")] == ["glinet_gl-mt1300"]
     assert match_profile(rel, board_name="nope,nope") == []
+
+
+def test_board_filter():
+    get, _ = fake_site()
+    rel = Catalog(BASE, get=get).release(select_channels(parse_versions(CONFIG_JS))[0],
+                                         boards=["ubnt,rocket-m"])
+    assert list(rel.profiles) == ["ubnt_rocket-m"]

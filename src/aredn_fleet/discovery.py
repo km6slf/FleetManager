@@ -43,10 +43,22 @@ class NodeInfo:
 Fetcher = Callable[[str], dict[str, Any]]
 
 
+SYSINFO_PATHS = (
+    "/a/sysinfo?link_info=1",              # AREDN 4.x UI (cgi path 307-redirects here)
+    "/cgi-bin/sysinfo.json?link_info=1",   # older firmware
+)
+
+
 def http_fetch(node: str, timeout: float = 8.0) -> dict[str, Any]:
-    url = f"http://{node}{MESH_SUFFIX}/cgi-bin/sysinfo.json?link_info=1"
-    with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 (mesh-local http)
-        return json.load(resp)
+    host = node if "." in node else node + MESH_SUFFIX
+    last: Exception | None = None
+    for path in SYSINFO_PATHS:
+        try:
+            with urllib.request.urlopen(f"http://{host}{path}", timeout=timeout) as resp:  # noqa: S310
+                return json.load(resp)
+        except urllib.error.HTTPError as exc:  # 404 on firmware without the new path
+            last = exc
+    raise last or OSError("no sysinfo")
 
 
 def parse_node(data: dict[str, Any]) -> tuple[NodeInfo, list[tuple[str, str]]]:
