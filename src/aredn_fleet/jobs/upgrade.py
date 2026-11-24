@@ -45,6 +45,7 @@ class UpgradeConfig:
     neighbour_timeout: float = 300
     soak_seconds: float = 180     # TBD: field-tune on the lab mesh
     ram_margin_kb: int = 4096
+    launch_check_seconds: float = 8
 
 
 @dataclass
@@ -81,6 +82,14 @@ def _neighbours(sysinfo: dict[str, Any] | None) -> set[str]:
 
 def _fw(sysinfo: dict[str, Any] | None) -> str:
     return str(((sysinfo or {}).get("node_details") or {}).get("firmware_version", ""))
+
+
+def _validation_ok(output: str) -> bool | None:
+    """Parse ``validate_firmware_image`` JSON; None if it can't be parsed."""
+    try:
+        return bool(json.loads(output).get("valid"))
+    except (ValueError, AttributeError):
+        return None
 
 
 def _kb(output: str, key: str) -> int:
@@ -167,10 +176,31 @@ class NodeUpgrade:
             await s.run(f"rm -f {REMOTE_IMAGE}")
             return self._fail(res, f"sha256 mismatch on node ({sha})")
 
+        # aredn_sysupgrade checks the image itself, but we launch it detached
+        # and would lose that verdict, so run the same validator first.
+        # Without --force it refuses a device mismatch; we never pass --force.
+        check = await s.run(f"/usr/libexec/validate_firmware_image {REMOTE_IMAGE}")
+        valid = _validation_ok(check.stdout)
+        if valid is False:
+            await s.run(f"rm -f {REMOTE_IMAGE}")
+            return self._fail(res, f"node rejected image: {check.stdout.strip()[:300]}")
+
         neighbours = _neighbours(before)
-        self.log(self.node, "sysupgrade", neighbours=sorted(neighbours))
+        self.log(self.node, "sysupgrade", neighbours=sorted(neighbours), validated=valid)
         await s.run(f"nohup {self.cfg.sysupgrade_cmd} {REMOTE_IMAGE} "
                     f">/tmp/aredn-fleet-upgrade.log 2>&1 </dev/null &", timeout=30)
+
+        # aredn_sysupgrade backs up the config (it stops babel first) before
+        # flashing. A failure there prints "ERROR:" and exits; catch it while
+        # the SSH session still works.
+        await self.sleep(self.cfg.launch_check_seconds)
+        try:
+            log = (await s.run("cat /tmp/aredn-fleet-upgrade.log", timeout=10)).stdout
+        except Exception:  # noqa: BLE001 - node already going down is the normal case
+            log = ""
+        if "ERROR" in log:
+            return self._fail(res, f"aredn_sysupgrade failed: {log.strip()[:300]} "
+                                   "(babel may be stopped; node may need a reboot)")
 
         if not await self._wait(lambda si: si is None, self.cfg.down_timeout):
             return self._fail(res, "node never went down; check /tmp/aredn-fleet-upgrade.log on the node")

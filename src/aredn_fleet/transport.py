@@ -65,12 +65,36 @@ class SSHSession:
         await self._conn.wait_closed()
 
 
-def _connect_kwargs(cred: Credential) -> dict:
+DEFAULT_KNOWN_HOSTS = Path.home() / ".config" / "aredn-fleet" / "known_hosts"
+
+
+class HostKeyChanged(Exception):
+    pass
+
+
+async def pin_host_key(host: str, known_hosts: Path) -> None:
+    """Trust on first use, then pin.
+
+    AREDN keeps /etc/dropbear/*host_key in its sysupgrade keep list (seen on a
+    4.26.1.0 node), so a node's host key should survive firmware upgrades. A
+    key that changes anyway means a reset/reflash or an impostor, and the
+    connection is refused until the operator removes the old entry.
+    """
+    import asyncssh
+
+    entry = f"[{host}]:{AREDN_SSH_PORT}"
+    if known_hosts.exists() and any(line.split(" ", 1)[0] == entry
+                                    for line in known_hosts.read_text().splitlines()):
+        return
+    key = await asyncssh.get_server_host_key(host, AREDN_SSH_PORT)
+    known_hosts.parent.mkdir(parents=True, exist_ok=True)
+    with known_hosts.open("a") as f:
+        f.write(f"{entry} {key.export_public_key('openssh').decode().strip()}\n")
+
+
+def _connect_kwargs(cred: Credential, known_hosts: Path) -> dict:
     kw: dict = {"username": AREDN_SSH_USER, "port": AREDN_SSH_PORT,
-                # TODO(safety): host-key checking is off for now. Before field
-                # use, pin keys in a fleet known_hosts file and decide how to
-                # handle a key that changes after a reflash.
-                "known_hosts": None, "connect_timeout": 15}
+                "known_hosts": str(known_hosts), "connect_timeout": 15}
     if cred.key_path:
         kw["client_keys"] = [os.path.expanduser(cred.key_path)]
         kw["password"] = None
@@ -83,14 +107,21 @@ def _connect_kwargs(cred: Credential) -> dict:
     return kw
 
 
-async def connect(node: str, store: CredentialStore, host_suffix: str = ".local.mesh") -> SSHSession:
+async def connect(node: str, store: CredentialStore, host_suffix: str = ".local.mesh",
+                  known_hosts: Path = DEFAULT_KNOWN_HOSTS) -> SSHSession:
     """Try each credential in turn and remember the first that works."""
     import asyncssh  # optional dependency: pip install aredn-fleet[ssh]
 
+    host = node + host_suffix
+    await pin_host_key(host, known_hosts)
     errors = []
     for cred in store.order_for(node):
         try:
-            conn = await asyncssh.connect(node + host_suffix, **_connect_kwargs(cred))
+            conn = await asyncssh.connect(host, **_connect_kwargs(cred, known_hosts))
+        except asyncssh.HostKeyNotVerifiable as exc:
+            raise HostKeyChanged(
+                f"{node}: host key does not match {known_hosts}; refusing to connect. "
+                "If the node was reset or replaced, remove its line and retry.") from exc
         except (asyncssh.PermissionDenied, AuthFailed) as exc:
             errors.append(f"{cred.label}: {exc}")
             continue

@@ -71,6 +71,26 @@ Plan:
 * Changing the operating mode (mesh / PtMP / PtP / station, etc.) follows the same staged, timed process, with extra checks for modes that change which node is the parent.
 * Open item: confirm, per firmware version, which config keys and apply command AREDN 4.26.x uses for channel, width, and mode. Read the node's own setup code before writing anything.
 
+## Field findings — bench node (MikroTik hAP ac lite, AREDN 4.26.1.0)
+* Board name is `mikrotik,routerboard-952ui-5ac2nd` (from `/tmp/sysinfo/board_name`) and the target is `ath79/mikrotik`.
+* RAM is tight: 57.6 MB total, about 20 MB available, and `/tmp` (tmpfs) has 27.8 MB free. That's enough for one ~8 MB image, but the RAM preflight check stays.
+* **`aredn_sysupgrade [--firstuse] [--force] <file>`**:
+  1. It first validates the image with `platform_check_image` and `/usr/libexec/validate_firmware_image`, checking both the signature and the device match.
+  2. Next it **stops babel**, writes a config backup (`aredn.configuration.backup` → `/tmp/arednsysupgradebackup.tgz`) and stops the manager.
+  3. Finally it runs `/sbin/sysupgrade -f <backup> -q`.
+  * Settings are preserved. The fleet manager never passes `--force`.
+  * The manager now runs the same validator itself before launching, since a detached launch would lose the exit code.
+  * After launch it checks the log for `ERROR:` while SSH still works. A failure after babel stops leaves the node off the mesh until it reboots, so the job stops and reports it.
+* **Host keys persist across upgrades.** `/etc/dropbear/dropbear_*_host_key` and `authorized_keys` are in the sysupgrade keep list. Host-key pinning is now enabled: trust on first use, then pin in `~/.config/aredn-fleet/known_hosts`. A changed key refuses the connection.
+* Radio config, as generated in `/etc/config/wireless` from `/etc/config.mesh/setup` by `node-setup`:
+  * `radio0.channel='131'`, `chanbw='20'`, `htmode='VHT20'`, `band='5g'`, `distance`, `txpower`
+  * mesh iface `mode='adhoc'` (IBSS), `ssid='AREDN-20-v3'`
+  * The SSID appears to encode the channel width.
+* Routing: `babeld` runs with a control socket at `/var/run/babel.sock`, and `socat` is installed. `arednlink` handles host and service distribution.
+* The web UI is server-side ucode (`uhttpd -o /a -O /app/root.ut`). Library code is in `/usr/share/ucode/aredn/` (`configuration.uc`, `radios.uc`, `babel.uc`, `hardware.uc`).
+* The node also runs telnet. Note this for the security section.
+* Open questions: the key names in `/etc/config.mesh/setup` for channel, width and mode, and the apply path after a change. Recon pass 2 reads `configuration.uc`, `radios.uc` and the UI's radio handlers.
+
 ## Credentials
 * Credentials are kept in an ordered list (keys before passwords), and the inventory records which one worked for each node.
 * Passwords come from environment variables, a prompt, or the OS keyring. They are never stored in the inventory file in plaintext.
@@ -97,8 +117,9 @@ Plan:
 * [x] SSH transport (asyncssh, port 2222) with credential probing
 * [x] Firmware job: dry run by default, stops on first failure, soak and re-check between waves, JSONL audit log (tested against a simulated mesh)
 * [x] GitHub Actions CI (Python 3.10, 3.12, 3.13)
-* [ ] SSH host-key pinning (currently off — must fix before field use)
-* [ ] Confirm the `aredn_sysupgrade` arguments and settings-preservation behavior on 4.26.x hardware
+* [x] SSH host-key pinning (TOFU + pin; keys confirmed to persist across sysupgrade)
+* [x] `aredn_sysupgrade` arguments and settings preservation confirmed from source on 4.26.1.0
+* [ ] First real upgrade on the bench node (4.26.1.0 → 4.26.10.0)
 * [ ] Radio settings job and node-side revert agent (.ipk)
 * [ ] Web UI
 * [ ] Field test on a lab mesh (2–3 spare nodes) before any production use

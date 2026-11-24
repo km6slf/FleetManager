@@ -20,6 +20,7 @@ class FakeMesh:
         self.uploaded: dict[str, bytes] = {}
         self.broken = set(broken)  # these come back on the old version
         self.commands: list[tuple[str, str]] = []
+        self.reject: set[str] = set()
 
     def neighbours(self, n):
         return {l.b if l.a == n else l.a for l in self.topo.links if n in (l.a, l.b)}
@@ -51,6 +52,9 @@ class FakeMesh:
                     return CommandResult(0, "MemTotal: 65536 kB\nMemAvailable: 30000 kB\n", "")
                 if cmd.startswith("sha256sum"):
                     return CommandResult(0, hashlib.sha256(mesh.uploaded[n]).hexdigest() + "  f\n", "")
+                if "validate_firmware_image" in cmd:
+                    ok = n not in mesh.reject
+                    return CommandResult(0, '{"valid": %s}' % ("true" if ok else "false"), "")
                 if "aredn_sysupgrade" in cmd:
                     mesh.reboot_polls[n] = 3
                 return CommandResult(0, "", "")
@@ -137,3 +141,14 @@ def test_already_current_is_skipped(tmp_path):
     plan = plan_rollout(t, "hub", ["far1"])
     rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, execute=True, sleep=no_sleep))
     assert rep.results[0].status == "skipped"
+
+
+def test_node_rejecting_image_never_flashes(tmp_path):
+    t = make_topo()
+    mesh = FakeMesh(t)
+    mesh.reject = {"far1"}
+    rel, store = release_and_store(tmp_path)
+    plan = plan_rollout(t, "hub", ["far1"])
+    rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, execute=True, sleep=no_sleep))
+    assert rep.results[0].status == "failed" and "rejected image" in rep.results[0].detail
+    assert not any("aredn_sysupgrade" in c for _, c in mesh.commands)
