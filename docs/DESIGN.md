@@ -71,14 +71,21 @@ How AREDN 4.26 stores and applies radio settings (read from a bench node):
 
 The job (`aredn-fleet radio`):
 1. **Preflight (read-only):** read the radio state and channel table over SSH, refuse channel/width pairs the hardware doesn't support, and refuse if a node's clock is more than 20 s off. Dry run stops here.
-2. **Arm:** upload a script to every node in the cluster that backs up `setup`, sleeps until a **shared switch time**, and applies the change through `aredn.configuration`. It then waits `revert_after` (default 600 s) and **restores the backup unless `/tmp/aredn-fleet-radio/confirmed` exists**. If arming fails on any node, the others are cancelled before the switch.
+2. **Arm:** upload a script to every node in the cluster.
+   * The script backs up `setup` to flash (`/etc/aredn-fleet-radio/`) and installs a boot hook in `/etc/rc.local`, which is in the sysupgrade keep list.
+   * It sleeps until a **shared switch time**, applies the change through `aredn.configuration`, and reboots if AREDN flags that a reboot is required.
+   * A revert timer, counted from boot so it doesn't depend on NTP, **restores the backup and reboots unless the change is confirmed** within `revert_after` (default 600 s).
+   * If arming fails on any node, the others are cancelled before the switch.
+   * Preflight refuses nodes that don't run `rc.local` at boot.
 3. **Verify:** poll every node's `meshrf.channel/chanbw` until it reports the new values.
 4. **Confirm all or none:** if every node verifies, touch `confirmed` on each. Otherwise confirm none, and the whole cluster reverts together instead of splitting.
 * Clusters are separated by DTD and tunnel links and are changed one at a time. The job stops after the first cluster that fails.
 * It warns when an unselected RF neighbor would lose its link.
 * Known limitations:
   * If a confirm fails partway through, the nodes already confirmed stay changed.
-  * A change that needs a reboot would wipe `/tmp` and with it the revert timer. The script logs `reboot-required`; this still needs testing on the bench.
+  * Writes about 2 KB to flash per change (the backup plus the rc.local line), and removes it on confirm, cancel or revert.
+* **4.26.1.0 detail:** in `node-setup`, the `case "wireless":` branch has no `break`, so it falls through to `default: changes.reboot = true`. As a result, **any wireless change, channel included, needs a reboot**, and `restart-services` exits without reloading anything. The job handles both cases: a reboot, or a plain `restart-services` if a later firmware fixes this.
+* The script's revert, confirm and reboot paths run under a POSIX shell with stubbed AREDN tools in CI (`tests/test_radio_script_sim.py`).
 
 ## Field findings — bench node (MikroTik hAP ac lite, AREDN 4.26.1.0)
 * Board name is `mikrotik,routerboard-952ui-5ac2nd` (from `/tmp/sysinfo/board_name`) and the target is `ath79/mikrotik`.
@@ -129,6 +136,7 @@ The job (`aredn-fleet radio`):
 * [x] GitHub Actions CI (Python 3.10, 3.12, 3.13)
 * [x] SSH host-key pinning (TOFU + pin; keys confirmed to persist across sysupgrade)
 * [x] `aredn_sysupgrade` arguments and settings preservation confirmed from source on 4.26.1.0
+* [x] Windows install, discover, `firmware fetch --board`, upgrade dry run against the bench node: all good
 * [ ] First real upgrade on the bench node (4.26.1.0 → 4.26.10.0)
 * [x] Radio settings job (synchronized switch per RF cluster, on-node auto-revert via pushed script; simulated-cluster tests)
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)

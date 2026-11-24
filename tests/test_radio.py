@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import subprocess
 
 import pytest
@@ -48,6 +49,7 @@ def test_script_is_valid_shell():
     assert 'c.setSetting("radio0_channel", "133")' in s
     assert 'c.setSetting("radio0_bandwidth", "10")' in s
     assert "setup.orig /etc/config.mesh/setup" in s
+    assert "/etc/aredn-fleet-radio" in s and "rc.local" in s
 
 
 def test_rf_clusters_split_on_dtd():
@@ -81,6 +83,7 @@ class FakeCluster:
         self.broken = set(broken)
         self.skew = skew
         self._script = {}
+        self.no_rclocal = set()
 
     async def sysinfo(self, n):
         if n in self.apply_at and self.clock.now() >= self.apply_at[n] and n not in self.cancelled \
@@ -96,17 +99,19 @@ class FakeCluster:
             async def run(self, cmd, timeout=60):
                 if cmd.startswith("ucode"):
                     return CommandResult(0, json.dumps(STATE), "")
+                if "rc.local" in cmd and cmd.startswith("[ -f"):
+                    return CommandResult(0, "" if n in fc.no_rclocal else "ok\n", "")
                 if cmd.startswith("date"):
                     return CommandResult(0, str(int(fc.clock.now() + fc.skew)), "")
                 if cmd.startswith("nohup"):
                     script = fc._script[n]
-                    at = int(script.split("[ ")[1].split(" ")[0])
+                    at = int(re.search(r"\[ (\d+) -gt", script).group(1))
                     ch = int(script.split('radio0_channel", "')[1].split('"')[0])
                     bw = int(script.split('radio0_bandwidth", "')[1].split('"')[0])
                     fc.apply_at[n], fc.pending[n] = at, (ch, bw)
-                if cmd.endswith("/confirmed"):
+                if "/confirmed" in cmd:
                     fc.confirmed.add(n)
-                if cmd.endswith("/cancel"):
+                if "/cancel" in cmd:
                     fc.cancelled.add(n)
                 return CommandResult(0, "", "")
 
@@ -165,3 +170,25 @@ def test_unsupported_channel_blocks_preflight():
     fc = FakeCluster(["a", "b"], clock)
     rep = go(fc, clock, change=RadioChange(channel=132, bandwidth=20))
     assert "nothing changed" in rep.reason and not fc.apply_at
+
+
+def test_parse_real_shape_channels_on_config_entry():
+    # Shape captured from a 4.26.1.0 hAP ac lite: tables live on each config entry.
+    real = {"config": [{"iface": "wlan0", "mode": {"mode": "mesh", "channel": 131, "bandwidth": 20},
+                        "bws": [5, 10, 20, 40, 80],
+                        "channels": {"10": [{"label": "133 (5665)", "number": 133, "frequency": 5665}],
+                                     "20": [{"label": "131 (5655)", "number": 131, "frequency": 5655}]}},
+                       {"iface": "wlan1", "mode": {"mode": "wan"}}],
+            "common": [{"iface": "wlan0", "mode": None, "channels": {}}]}
+    st = parse_radio_state(json.dumps(real))
+    assert st.channels_by_bw == {"10": [133], "20": [131]}
+    assert check_change(st, RadioChange(channel=133, bandwidth=10)) is None
+
+
+def test_missing_boot_hook_blocks_preflight():
+    clock = Clock()
+    fc = FakeCluster(["a", "b"], clock)
+    fc.no_rclocal = {"b"}
+    rep = go(fc, clock)
+    assert rep.results["b"].status == "failed" and "rc.local" in rep.results["b"].detail
+    assert not fc.apply_at
