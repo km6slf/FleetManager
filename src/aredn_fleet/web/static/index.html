@@ -17,6 +17,7 @@
     <button data-tab="nodes" class="active">Nodes</button>
     <button data-tab="map">Map</button>
     <button data-tab="firmware">Firmware</button>
+    <button data-tab="install">New device</button>
     <button data-tab="creds">Credentials</button>
     <button data-tab="activity">Activity <span id="activity-dot" class="dot hidden"></span></button>
   </nav>
@@ -134,6 +135,25 @@
           </div>
           <div class="row"><button id="btn-fetch" class="primary">Download</button></div>
         </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ======================= NEW DEVICE ======================= -->
+  <section id="tab-install" class="tab">
+    <div class="split">
+      <div class="panel">
+        <h3>Put AREDN on a new device</h3>
+        <p class="hint">Pick the hardware. Fleet Manager downloads the right image from AREDN (checked against its SHA-256) and walks you through that manufacturer's install method, following <a href="https://arednmesh.readthedocs.io/en/latest/arednGettingStarted/installing_firmware.html" target="_blank" rel="noopener">AREDN's install guide</a>.</p>
+        <div class="grid2">
+          <label>Release <select id="in-version"></select></label>
+          <label>Search hardware <input id="in-search" placeholder="e.g. hAP, CPE210, NanoStation"></label>
+        </div>
+        <div id="in-list" class="in-list"><p class="hint">Loading AREDN's hardware list…</p></div>
+      </div>
+      <aside class="panel actions">
+        <h3 id="in-title">Steps</h3>
+        <div id="in-steps" class="card"><p class="hint">Choose a device on the left.</p></div>
       </aside>
     </div>
   </section>

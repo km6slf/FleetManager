@@ -49,6 +49,7 @@ function showTab(name) {
   if (name === "map") drawMap();
   if (name === "firmware") loadFirmware();
   if (name === "creds") loadCreds();
+  if (name === "install") loadInstall();
   if (name === "activity") loadJobs();
 }
 $$("#tabs button").forEach((b) => b.addEventListener("click", () => { history.replaceState(null, "", "#" + b.dataset.tab); showTab(b.dataset.tab); }));
@@ -718,6 +719,90 @@ $("#btn-fetch").addEventListener("click", () => guarded(async () => {
   } });
   followJob(job.id, { onDone: loadFirmware });
 }));
+
+// ------------------------------------------------------------------ new device (first install)
+const installState = { hw: [], loaded: false, chosen: null, prepared: null };
+
+async function loadInstall() {
+  if (installState.loaded) return;
+  const r = await api("/api/install/releases");
+  $("#in-version").innerHTML = r.releases.map((v) =>
+    `<option value="${esc(v)}" ${v === r.default ? "selected" : ""}>${esc(v)}${/^\d+(\.\d+){3}$/.test(v) ? "" : " (nightly, testing only)"}</option>`).join("");
+  installState.loaded = true;
+  await loadInstallHardware();
+}
+
+async function loadInstallHardware() {
+  $("#in-list").innerHTML = '<p class="hint">Loading AREDN\'s hardware list…</p>';
+  const r = await api(`/api/install/hardware?version=${encodeURIComponent($("#in-version").value)}`);
+  installState.hw = r.hardware;
+  renderInstallList();
+}
+
+function renderInstallList() {
+  const q = $("#in-search").value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const rows = installState.hw.filter((h) => !q || (h.titles.join(" ") + h.id).toLowerCase().replace(/[^a-z0-9]/g, "").includes(q));
+  $("#in-list").innerHTML = rows.length ? `<table class="in-table"><thead><tr><th>Hardware</th><th>Install method</th></tr></thead><tbody>${
+    rows.map((h) => `<tr data-id="${esc(h.id)}" class="${installState.chosen === h.id ? "selected" : ""}"><td><b>${esc(h.titles[0] || h.id)}</b>${h.titles.length > 1 ? `<div class="muted small">also: ${esc(h.titles.slice(1).join("; "))}</div>` : ""}<div class="muted small">${esc(h.id)} · ${esc(h.target)}</div></td><td>${esc(h.method_name)}</td></tr>`).join("")
+  }</tbody></table>` : '<p class="hint">No hardware matches.</p>';
+  $$("#in-list tr[data-id]").forEach((tr) => tr.addEventListener("click", () => guarded(() => chooseInstall(tr.dataset.id))));
+}
+
+async function chooseInstall(id) {
+  installState.chosen = id;
+  renderInstallList();
+  const h = installState.hw.find((x) => x.id === id);
+  $("#in-title").textContent = h.titles[0] || id;
+  $("#in-steps").innerHTML = `<p><b>${esc(h.method_name)}</b></p>
+    <p class="hint">Fleet Manager downloads the image(s) this method needs for ${esc($("#in-version").value)}, then shows the steps.</p>
+    <div class="row"><button id="btn-in-prepare" class="primary">Get the files and show the steps</button></div>`;
+  const btn = $("#btn-in-prepare");
+  btn.addEventListener("click", () => guarded(async () => {
+    busy(btn, true);
+    try {
+      const job = await runAndWait("/api/install/prepare", { version: $("#in-version").value, profile: id }, "Downloading from AREDN…");
+      installState.prepared = job.result;
+      renderInstallSteps(job.result);
+    } finally { if (btn.isConnected) busy(btn, false); }
+  }));
+}
+
+function renderInstallSteps(r) {
+  const m = r.method;
+  const autoNote = { tftp: "A later Fleet Manager build will send this itself.", pxe: "A later Fleet Manager build will run this server itself.",
+    upload: "A later Fleet Manager build will upload this itself." };
+  const files = r.files.map((f) => `<li><code>${esc(f.as || f.name)}</code> <span class="muted small">(${esc(f.type)}${f.as ? `, a copy of ${esc(f.name)}` : ""})</span>
+      <button class="ghost small-btn" data-open="${esc(f.as_path || f.path)}">Show</button></li>`).join("");
+  const steps = m.steps.map((s, i) => `<li class="in-step"><label class="check"><input type="checkbox"> <b>${esc(s.title)}</b></label>
+      <div>${esc(s.text)}</div>
+      ${s.warn ? `<div class="st-blocked">⚠ ${esc(s.warn)}</div>` : ""}
+      ${autoNote[s.auto] ? `<div class="muted small">${autoNote[s.auto]}</div>` : ""}
+      ${s.auto === "probe" ? `<div class="row"><input class="in-probe-ip" value="${esc(m.device_ip && m.key !== "ubnt-tftp" ? m.device_ip : "192.168.1.1")}" size="14"><button class="in-probe">Look for the node</button><span class="in-probe-out muted small"></span></div>` : ""}
+    </li>`).join("");
+  $("#in-steps").innerHTML = `<p><b>${esc(m.name)}</b></p><p class="hint">${esc(m.summary)}</p>
+    ${m.risk ? `<p class="st-blocked">⚠ ${esc(m.risk)}</p>` : ""}
+    ${m.pc_ip ? `<p class="small"><b>This computer:</b> ${esc(m.pc_ip)}${m.device_ip ? ` · <b>device:</b> ${esc(m.device_ip)}` : ""}</p>` : (m.device_ip ? `<p class="small"><b>Device:</b> ${esc(m.device_ip)}</p>` : "")}
+    <p class="small"><b>Files</b> (in <code>${esc(r.folder)}</code>) <button class="ghost small-btn" data-open="${esc(r.folder)}">Open folder</button></p>
+    <ul class="in-files">${files || "<li class='muted'>none</li>"}</ul>
+    ${r.other_images.length ? `<p class="muted small">AREDN also publishes for this hardware: ${r.other_images.map((o) => esc(o.type)).join(", ")}. Check AREDN's guide if you're unsure which applies.</p>` : ""}
+    <ol class="in-steps">${steps}</ol>
+    <p class="muted small">Steps from <a href="${esc(r.guide)}" target="_blank" rel="noopener">AREDN's install guide</a>.</p>`;
+  $$("#in-steps [data-open]").forEach((b) => b.addEventListener("click", () => guarded(async () => {
+    const o = await api("/api/open-folder", { body: { path: b.dataset.open } });
+    if (!o.opened) toast(`It's at ${o.path || b.dataset.open}`);
+  })));
+  $$("#in-steps .in-probe").forEach((b) => b.addEventListener("click", () => guarded(async () => {
+    const row = b.closest(".row"), out = row.querySelector(".in-probe-out");
+    out.textContent = "Looking…";
+    const ip = row.querySelector(".in-probe-ip").value.trim();
+    const p = await api(`/api/install/probe?ip=${encodeURIComponent(ip)}`);
+    out.innerHTML = p.found ? `<span class="st-go">Found AREDN: ${esc(p.node || "(first boot)")} · ${esc(p.firmware)} · ${esc(p.model)}</span>`
+      : `Not answering yet. Give it a minute and try again.`;
+  })));
+}
+
+$("#in-version").addEventListener("change", () => guarded(loadInstallHardware));
+$("#in-search").addEventListener("input", renderInstallList);
 
 // ------------------------------------------------------------------ credentials
 $$('input[name="crkind"]').forEach((r) => r.addEventListener("change", () => {

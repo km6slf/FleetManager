@@ -187,6 +187,15 @@ Fleet Manager doesn't carry a list of AREDN settings: they change between releas
 * **sysinfo moved:** `/cgi-bin/sysinfo.json` now returns a 307 redirect to `/a/sysinfo`. Discovery requests `/a/sysinfo` first and falls back to the old path.
 * Babel's control socket (`echo dump | socat - UNIX-CONNECT:/var/run/babel.sock`) lists interfaces, neighbors and routes with their next hops. This can give exact hop paths without traceroute (planned).
 
+## New device (first install)
+A **New device** tab walks through putting AREDN on hardware for the first time (`aredn_fleet/install.py`), following AREDN's install guide (https://arednmesh.readthedocs.io/en/latest/arednGettingStarted/installing_firmware.html).
+* Pick a release and search AREDN's hardware list for it (the catalog's `overview.json`; stable releases cached on disk).
+* The install method comes from the hardware's catalog profile: Ubiquiti 802.11n (TFTP of the factory image to 192.168.1.20), Ubiquiti 802.11ac (airOS 8.7.0/8.7.4, SCP + patched flasher; marked advanced), MikroTik (network-boot the initramfs `kernel` image as `rb.elf`, then sysupgrade from 192.168.1.1), TP-Link CPE/WBS (PharOS upload, or the factory image as `recovery.bin` by network recovery with the PC at 192.168.0.100), GL.iNet, Cudy (Cudy's own OpenWrt first), OpenWrt One (NAND switch, LuCI), MorseMicro/HaLow-style LuCI, Zyxel, x86 (VM guide); anything else points to AREDN's guide with every image AREDN publishes for it.
+* "Get the files" downloads the images that method needs (SHA-256 checked) into `config/install/<profile>-<release>/`, adds copies under the names devices ask for (`rb.elf`, `recovery.bin`), and lists any other images AREDN publishes for that hardware (e.g. MikroTik `sysupgrade-v7`) without guessing which applies.
+* Steps show the PC and device addresses, a checkbox per step, "Show"/"Open folder" for the files (restricted to Fleet Manager's own folders), and "Look for the node", a read-only sysinfo check that finds the new node (192.168.1.1 by default).
+* Planned automation, marked in the steps: a built-in TFTP push (Ubiquiti 802.11n), a built-in BOOTP/DHCP + TFTP network-boot server (MikroTik, TP-Link), and uploading the sysupgrade image to the temporary AREDN (MikroTik stage 2).
+* Test hardware to order (one per method): TP-Link CPE210/510 v3, MikroTik hAP ac2, a used Ubiquiti XW unit; optionally a GL.iNet GL-AR300M16 or GL-MT1300.
+
 ## Credentials
 * Credentials are kept in an ordered list (keys before passwords), and the inventory records which one worked for each node.
 * Passwords come from environment variables, a prompt, or the OS keyring. They are never stored in the inventory file in plaintext.
@@ -261,6 +270,8 @@ Fleet Manager doesn't carry a list of AREDN settings: they change between releas
 * [x] OLSR-era nodes: old status page, routing badge, migration rule, last release per hardware, older upgrade procedure (tested against a simulated node; recon from a real 3.23.8.0 NanoStation)
 * [x] Settings on older nodes through their own Advanced Configuration page (tested with the real 3.23.8.0 page)
 * [x] Babel badge; backup files named for the node
+* [x] New device wizard: hardware picker from AREDN's catalog, method per hardware, images downloaded and renamed, step-by-step guide, look-for-the-node check
+* [ ] Wizard automation: TFTP push, network-boot server, stage-2 upload
 * [ ] First real upgrade of an older node (NanoStation M2 XM 3.23.8.0 → 3.25.5.1)
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)
 * [x] Nightly recon (3 passes): new channel-list format and setter names supported

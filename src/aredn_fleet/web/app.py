@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import sys
 import secrets
 from dataclasses import asdict
@@ -54,6 +55,15 @@ class FetchReq(BaseModel):
     nightly: bool = True
     include_factory: bool = False
     version: str | None = None     # one specific release (e.g. 3.25.5.1), instead of the channels
+
+
+class InstallReq(BaseModel):
+    version: str
+    profile: str
+
+
+class OpenReq(BaseModel):
+    path: str
 
 
 class PlanReq(BaseModel):
@@ -525,6 +535,119 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             return (f"{n}: firmware {fw} is older than radio changes support (its web UI is Lua, "
                     "not ucode). Upgrade it to an OLSR + Babel release first.")
         return None
+
+    # ------------------------------------------------------------ new device (first install)
+    def _catalog_json(cat: Catalog, version: str, path: str) -> dict:
+        """Stable releases never change: cache their catalog files on disk."""
+        from ..firmware import STABLE_RE
+        if STABLE_RE.match(version):
+            return ReleaseIndex(cat, state.fw_dir / "catalog")._cached(version, path)
+        return cat._json(path)
+
+    @app.get("/api/install/releases")
+    async def install_releases():
+        from ..firmware import NIGHTLY_RE, STABLE_RE, _stable_key
+        cat = Catalog(state.mirror)
+        try:
+            versions = await asyncio.to_thread(cat.versions)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"can't reach {state.mirror}: {exc}") from exc
+        stable = sorted((v for v in versions if STABLE_RE.match(v)), key=_stable_key, reverse=True)
+        nightly = sorted((v for v in versions if NIGHTLY_RE.match(v)), reverse=True)[:1]
+        return {"releases": stable + nightly, "default": stable[0] if stable else None}
+
+    @app.get("/api/install/hardware")
+    async def install_hardware(version: str):
+        from ..firmware import _title
+        from ..install import method_for
+        cat = Catalog(state.mirror)
+        versions = await asyncio.to_thread(cat.versions)
+        if version not in versions:
+            raise HTTPException(404, f"{version} isn't in AREDN's catalog")
+        ov = await asyncio.to_thread(_catalog_json, cat, version,
+                                     f"afs/www/{versions[version]}/overview.json")
+        rows = []
+        for p in ov.get("profiles", []):
+            titles = [_title(t) for t in p.get("titles", [])]
+            m = method_for(p["id"], p.get("target", ""), titles)
+            rows.append({"id": p["id"], "target": p.get("target", ""), "titles": titles,
+                         "method": m.key, "method_name": m.name})
+        rows.sort(key=lambda r: (r["titles"][0] if r["titles"] else r["id"]).lower())
+        return {"version": version, "hardware": rows}
+
+    @app.post("/api/install/prepare")
+    async def install_prepare(req: InstallReq):
+        from ..firmware import Channel, FirmwareStore
+        from ..install import method_for, pick_images, stage_files
+
+        async def body(job: Job):
+            cat = Catalog(state.mirror)
+            versions = await asyncio.to_thread(cat.versions)
+            if req.version not in versions:
+                raise ValueError(f"{req.version} isn't in AREDN's catalog")
+            rel = await asyncio.to_thread(cat.release, Channel("install", req.version, versions[req.version]),
+                                          [req.profile])
+            prof = rel.profiles.get(req.profile)
+            if not prof:
+                raise ValueError(f"{req.profile} isn't in {req.version}")
+            method = method_for(prof.id, prof.target, prof.titles)
+            use, other = pick_images(method, [i.type for i in prof.images])
+            missing = [t for t in method.images if t not in use]
+            if missing:
+                job.log(f"AREDN publishes no {', '.join(missing)} image for this hardware in "
+                        f"{req.version}; follow AREDN's guide for it.", "warn")
+            store = FirmwareStore(state.fw_dir)
+            staged: list[tuple[str, Path]] = []
+            for kind in use:
+                img = prof.image(kind)
+                job.log(f"Downloading {img.name}…")
+                r = await asyncio.to_thread(store.fetch, rel, prof, img)
+                if r.status == "failed":
+                    raise ValueError(f"{img.name}: {r.error}")
+                job.log(f"{img.name}: {r.status}, SHA-256 checked", "ok")
+                staged.append((kind, r.path))
+            dest = state.config_dir / "install" / f"{prof.id}-{req.version}"
+            files = stage_files(staged, method, dest)
+            for f in files:
+                if f.get("as"):
+                    job.log(f"Copied as {f['as']} (the name the device asks for)")
+            job.log(f"Ready in {dest}", "ok")
+            return {"version": req.version, "profile": prof.id, "titles": prof.titles,
+                    "target": prof.target, "method": method.to_json(), "files": files,
+                    "other_images": [{"type": i.type, "name": i.name} for i in prof.images
+                                     if i.type in other],
+                    "folder": str(dest), "guide": GUIDE}
+
+        from ..install import GUIDE
+        return start("install", f"Prepare install: {req.profile} {req.version}", False, body)
+
+    @app.get("/api/install/probe")
+    async def install_probe(ip: str = "192.168.1.1"):
+        """Is there an AREDN node answering at this address yet? (read-only)"""
+        if not re.match(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$", ip):
+            raise HTTPException(400, "give an IPv4 address")
+        from ..discovery import http_fetch
+        try:
+            si = await asyncio.to_thread(http_fetch, ip, 4.0)
+        except Exception as exc:  # noqa: BLE001
+            return {"found": False, "detail": str(exc)[:200]}
+        d = si.get("node_details") or {}
+        return {"found": True, "node": si.get("node", ""), "firmware": d.get("firmware_version", ""),
+                "model": d.get("model", "")}
+
+    @app.post("/api/open-folder")
+    async def open_folder(req: OpenReq):
+        """Show a file or folder in Explorer, only inside Fleet Manager's own folders."""
+        target = Path(req.path).resolve()
+        roots = [state.config_dir.resolve(), state.fw_dir.resolve()]
+        if not any(target == r or r in target.parents for r in roots):
+            raise HTTPException(403, "only Fleet Manager's own folders")
+        if sys.platform == "win32":
+            import subprocess
+            args = ["explorer", "/select,", str(target)] if target.is_file() else ["explorer", str(target)]
+            subprocess.Popen(args)  # noqa: S603,S607
+            return {"opened": True}
+        return {"opened": False, "path": str(target)}
 
     # ------------------------------------------------------------ on/off settings (from node dialogs)
     @app.post("/api/settings/read")
