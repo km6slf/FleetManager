@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aredn-fleet"
+version = "0.1.0.dev0"
+description = "Safe, bulk updating of AREDN mesh nodes"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+dependencies = []
+
+[project.optional-dependencies]
+ssh = ["asyncssh>=2.14"]
+web = ["fastapi>=0.110", "uvicorn>=0.29", "jinja2>=3.1"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+aredn-fleet = "aredn_fleet.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aredn_fleet"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
