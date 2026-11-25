@@ -3,7 +3,7 @@
 #   docker compose -f packaging/docker/docker-compose.windows.yml --env-file .env up -d
 services:
   fleet:
-    image: ghcr.io/km6slf/fleetmanager:${FLEET_TAG:-latest}
+    image: ghcr.io/km6slf/fleetmanager:${FLEET_TAG:-dev}
     container_name: aredn-fleet
     restart: unless-stopped
     ports:

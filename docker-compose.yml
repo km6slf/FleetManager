@@ -5,7 +5,7 @@
 # Upgrade:  docker compose pull && docker compose up -d     (your data stays in the volume)
 services:
   fleet:
-    image: ghcr.io/km6slf/fleetmanager:${FLEET_TAG:-latest}
+    image: ghcr.io/km6slf/fleetmanager:${FLEET_TAG:-dev}
     container_name: aredn-fleet
     restart: unless-stopped
     ports:

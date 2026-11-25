@@ -82,7 +82,7 @@ aredn-fleet serve --host 0.0.0.0     # prints a link with an access token
 2. Edit `.env`:
    - `FLEET_SECRETS_PASSWORD`: a long password of your choice. It unlocks the encrypted file in which Fleet Manager keeps saved node and Wi-Fi passwords. **Keep it**: it's needed on every start, and changing it makes saved passwords unreadable.
    - `AREDN_FLEET_DNS`: the node's address from above. Docker's own name lookup doesn't know mesh names, so Fleet Manager asks this node for `localnode` and `*.local.mesh`.
-   - `FLEET_TAG` (optional): `latest` (newest numbered release), `dev` (newest build, least tested) or a version such as `0.1.0-alpha.1`.
+   - `FLEET_TAG` (optional): `dev` (newest build of `main`, the default for now), `latest` (newest numbered release; the first release with a Docker image will be the one after 0.1.0-alpha.1) or a version number to stay on it.
 3. Start it:
    ```bash
    docker compose up -d
@@ -105,7 +105,7 @@ Linux:
 docker run -d --name aredn-fleet --restart unless-stopped \
   -p 127.0.0.1:8787:8787 -v fleet-data:/data \
   -e FLEET_SECRETS_PASSWORD='your-long-password' -e AREDN_FLEET_DNS=10.99.154.177 \
-  ghcr.io/km6slf/fleetmanager:latest
+  ghcr.io/km6slf/fleetmanager:dev
 docker logs aredn-fleet
 ```
 Windows (PowerShell, Docker Desktop in its default Linux-container mode):
@@ -113,7 +113,7 @@ Windows (PowerShell, Docker Desktop in its default Linux-container mode):
 docker run -d --name aredn-fleet --restart unless-stopped `
   -p 127.0.0.1:8787:8787 -v fleet-data:/data `
   -e FLEET_SECRETS_PASSWORD='your-long-password' -e AREDN_FLEET_DNS=10.99.154.177 `
-  ghcr.io/km6slf/fleetmanager:latest
+  ghcr.io/km6slf/fleetmanager:dev
 docker logs aredn-fleet
 ```
 Windows containers (Docker switched to "Windows containers"): the same, but with `-v fleet-data:C:\data` and `-p 8787:8787`, or `docker compose -f packaging/docker/docker-compose.windows.yml --env-file .env up -d`. The Windows image is built on Windows Server 2022 (`ltsc2022`); on Windows 10/11 it runs with Hyper-V isolation.
