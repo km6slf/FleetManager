@@ -871,6 +871,7 @@ function followJob(id, { onDone, switchTab = true, quiet = false } = {}) {
     state.jobCursor = j.next;
     const log = $("#log");
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+    if (j.events.some((ev) => ev.level === "error")) state.jobErrors = (state.jobErrors || new Set()).add(id);
     log.insertAdjacentHTML("beforeend", j.events.map((ev) =>
       `<div class="${esc(ev.level)}"><span class="ts">${new Date(ev.t * 1000).toLocaleTimeString()}</span>  ${esc(ev.msg)}</div>`).join(""));
     if (atBottom) log.scrollTop = log.scrollHeight;
@@ -895,6 +896,7 @@ function followJob(id, { onDone, switchTab = true, quiet = false } = {}) {
     else {
       if (quiet) toast(j.status === "done" ? "Done" : `Job ${j.status}`, j.status !== "done");
       onDone && onDone(j);
+      if (j.status !== "done" || state.jobErrors?.has(id)) checkNetwork();
     }
   };
   tick();
@@ -913,9 +915,36 @@ function followJob(id, { onDone, switchTab = true, quiet = false } = {}) {
   await Promise.all([loadTopology(), loadFirmware()]);
   checkChannels();
   loadJobs();
+  checkNetwork();
   const want = location.hash.slice(1);
   if (want && $(`#tab-${want}`)) showTab(want);
 })();
+
+// ------------------------------------------------------------------ PC network check
+// A route on this PC that sends mesh traffic to an address it can't reach (e.g. left over from
+// a node the PC was cabled to before) makes some connections fail at random. Read-only check;
+// shown at start-up and after a job with errors, once per route per session.
+const netShown = new Set();
+async function checkNetwork() {
+  let r;
+  try { r = await api("/api/netcheck"); } catch (_) { return; }
+  const fresh = (r.stale || []).filter((x) => !netShown.has(x.command));
+  if (!fresh.length) return;
+  fresh.forEach((x) => netShown.add(x.command));
+  const cmds = fresh.map((x) => x.command).join("\n");
+  $("#nw-body").innerHTML = `
+    <p>Windows has ${fresh.length === 1 ? "a route" : "routes"} to the mesh through an address this PC isn't connected to.
+    It's usually left over from a node the PC was cabled to before. Windows sometimes picks it,
+    and then connections to nodes fail at random.</p>
+    <table class="ledger"><tr><th>Mesh addresses</th><th>Through</th><th>Adapter</th></tr>
+    ${fresh.map((x) => `<tr><td>${esc(x.prefix)}</td><td>${esc(x.next_hop)}</td><td>${esc(x.iface)}</td></tr>`).join("")}</table>
+    <p>To remove ${fresh.length === 1 ? "it" : "them"}, run this in PowerShell <b>as administrator</b>
+    (only ${fresh.length === 1 ? "this route is" : "these routes are"} removed; Fleet Manager never changes your routes itself):</p>
+    <pre id="nw-cmd">${esc(cmds)}</pre>
+    <p class="hint">Unplugging the network cable for a few seconds and plugging it back in often clears it too.</p>`;
+  $("#nw-copy").onclick = () => guarded(async () => { await copyText(cmds); toast("Command copied"); });
+  $("#netwarn").showModal();
+}
 
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); return; } catch (_) { /* fall back below */ }

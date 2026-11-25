@@ -29,7 +29,7 @@ from ..credentials import Credential, forget_password, store_password
 from ..discovery import crawl
 from ..firmware import Catalog, Channel, FirmwareStore, ReleaseIndex, match_profile, select_channels
 from ..topology import PlanError, plan_rollout
-from ..transport import errtext
+from ..transport import errtext, transient, with_retries
 from .state import AppState, Job, JobBusy, radio_options
 
 STATIC = Path(__file__).parent / "static"
@@ -185,6 +185,8 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                     f"manager attached at {res.start}")
             for n, e in res.errors.items():
                 job.log(f"{n}: unreachable ({e})", "warn")
+                for line in await asyncio.to_thread(link_lines, n):
+                    job.log(f"  {line}", "warn")
             return {"nodes": len(res.nodes), "links": len(res.topology.links)}
         return start("discover", f"Discover from {req.start}", False, body)
 
@@ -445,14 +447,17 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             async def one(n):
                 nonlocal ok
                 async with sem:
-                    try:
+                    async def read():
                         s = await connect(n)
                         try:
-                            inv = await read_node_radios(s)
+                            return await read_node_radios(s)
                         finally:
                             await s.close()
+                    try:
+                        inv = await with_retries(read, attempts=2, on_retry=retry_logger(job, n))
                     except Exception as exc:  # noqa: BLE001
                         job.log(f"{n}: couldn't read radios ({errtext(exc)})", "error")
+                        await log_link_hint(job, n, exc)
                         return
                     state.set_radios(n, inv)
                     ok += 1
@@ -556,6 +561,29 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
         title = f"{'Radio change' if req.execute else 'Radio dry run'} ({len(req.nodes)} nodes)"
         return start("radio", title, req.execute, body, fp, dry_run=not req.execute)
+
+    def retry_logger(job: Job, n: str):
+        def log(attempt: int, exc: BaseException) -> None:
+            job.log(f"{n}: {errtext(exc)}; trying again", "warn")
+        return log
+
+    def link_lines(n: str) -> list[str]:
+        """How n's neighbours see their link to it (their own link measurements)."""
+        from ..discovery import http_fetch
+        from ..linkq import link_report
+        nbs = state.topology.adjacency().get(n, set())
+        return link_report(n, nbs, lambda nb: http_fetch(nb, 8.0, "link_info=1&lqm=1"))
+
+    async def log_link_hint(job: Job, n: str, exc: BaseException) -> None:
+        if not transient(exc):
+            return
+        for line in await asyncio.to_thread(link_lines, n):
+            job.log(f"  {line}", "warn")
+
+    @app.get("/api/netcheck")
+    async def netcheck():
+        from ..netcheck import check
+        return await asyncio.to_thread(check)
 
     async def tiny_check(fn, names) -> None:
         try:
@@ -727,14 +755,17 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             async def one(n):
                 nonlocal ok
                 async with sem:
-                    try:
+                    async def read():
                         s = await connect(n)
                         try:
-                            ns = await read_node_settings(s)
+                            return await read_node_settings(s)
                         finally:
                             await s.close()
+                    try:
+                        ns = await with_retries(read, attempts=2, on_retry=retry_logger(job, n))
                     except Exception as exc:  # noqa: BLE001
                         job.log(f"{n}: couldn't read settings ({errtext(exc)})", "error")
+                        await log_link_hint(job, n, exc)
                         return
                     state.set_settings(n, ns)
                     ok += 1

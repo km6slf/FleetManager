@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import socket
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -46,17 +47,17 @@ Fetcher = Callable[[str], dict[str, Any]]
 
 
 SYSINFO_PATHS = (
-    ":80/a/sysinfo?link_info=1",              # AREDN 4.x UI (cgi path 307-redirects here)
-    ":80/cgi-bin/sysinfo.json?link_info=1",   # older firmware (api_version 1.x, Lua UI)
-    ":8080/cgi-bin/sysinfo.json?link_info=1", # oldest firmware served its pages on 8080 only
+    ":80/a/sysinfo?{q}",              # AREDN 4.x UI (cgi path 307-redirects here)
+    ":80/cgi-bin/sysinfo.json?{q}",   # older firmware (api_version 1.x, Lua UI)
+    ":8080/cgi-bin/sysinfo.json?{q}", # oldest firmware served its pages on 8080 only
 )
 
 
-def http_fetch(node: str, timeout: float = 8.0) -> dict[str, Any]:
+def http_fetch(node: str, timeout: float = 8.0, query: str = "link_info=1") -> dict[str, Any]:
     host = node if "." in node else node + MESH_SUFFIX
     host = meshdns.address(host)      # mesh names are looked up on the mesh node, not Windows' DNS
     last: Exception | None = None
-    for path in SYSINFO_PATHS:
+    for path in (p.format(q=query) for p in SYSINFO_PATHS):
         try:
             with urllib.request.urlopen(f"http://{host}{path}", timeout=timeout) as resp:  # noqa: S310
                 data = json.load(resp)
@@ -131,10 +132,16 @@ def crawl(start: str = "localnode", fetch: Fetcher = http_fetch, workers: int = 
     errors: dict[str, str] = {}
 
     def one(name: str):
-        try:
-            return name, parse_node(fetch(name)), None
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            return name, None, str(exc)
+        # Mesh links drop packets in bursts: a node that doesn't answer gets two more tries.
+        err = ""
+        for attempt in range(3):
+            try:
+                return name, parse_node(fetch(name)), None
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                err = str(exc) or type(exc).__name__
+                if fetch is http_fetch and attempt < 2:
+                    time.sleep(2)
+        return name, None, err
 
     # The start alias (e.g. "localnode") resolves to a real node name. Its status also says
     # which address to ask for mesh names from here on (its LAN address).

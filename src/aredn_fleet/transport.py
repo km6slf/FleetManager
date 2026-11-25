@@ -143,13 +143,14 @@ async def connect(node: str, store: CredentialStore, host_suffix: str = ".local.
     # Connect to the address the mesh node gives (not Windows' DNS), but pin and check the host
     # key under the node's name, so an address change doesn't look like a different node.
     addr = await asyncio.to_thread(meshdns.address, host)
-    await pin_host_key(host, known_hosts, addr)
+    # Reaching the node is retried (lossy links); wrong credentials and changed keys are not.
+    await with_retries(lambda: pin_host_key(host, known_hosts, addr))
     pinned = _pinned_keys(host, known_hosts)
     errors = []
     for cred in store.order_for(node):
         try:
-            conn = await asyncssh.connect(addr, **{**_connect_kwargs(cred, known_hosts),
-                                                   "known_hosts": pinned})
+            conn = await with_retries(lambda: asyncssh.connect(
+                addr, **{**_connect_kwargs(cred, known_hosts), "known_hosts": pinned}))
         except asyncssh.HostKeyNotVerifiable as exc:
             raise HostKeyChanged(
                 f"{node}: host key does not match {known_hosts}; refusing to connect. "
@@ -177,3 +178,35 @@ def errtext(exc: BaseException) -> str:
         return "timed out (no answer from the node)"
     msg = str(exc).strip()
     return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+
+
+def transient(exc: BaseException) -> bool:
+    """A failure worth trying again: the node or link was slow or dropped packets. Wrong
+    credentials and changed host keys are not retried."""
+    if isinstance(exc, (AuthFailed, HostKeyChanged)):
+        return False
+    try:
+        import asyncssh
+        if isinstance(exc, (asyncssh.PermissionDenied, asyncssh.HostKeyNotVerifiable)):
+            return False
+        if isinstance(exc, (asyncssh.ConnectionLost, asyncssh.DisconnectError)):
+            return True
+    except ImportError:
+        pass
+    return isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError))
+
+
+async def with_retries(fn, attempts: int = 3, delays: tuple[float, ...] = (3.0, 8.0),
+                       on_retry=None, sleep=None):
+    """Run a **read-only** step again when it fails for a transient reason (mesh links drop
+    packets in bursts). Never use this for steps that change a node."""
+    sleep = sleep or asyncio.sleep
+    for i in range(attempts):
+        try:
+            return await fn()
+        except Exception as exc:  # noqa: BLE001
+            if i == attempts - 1 or not transient(exc):
+                raise
+            if on_retry:
+                on_retry(i + 1, exc)
+            await sleep(delays[min(i, len(delays) - 1)])
