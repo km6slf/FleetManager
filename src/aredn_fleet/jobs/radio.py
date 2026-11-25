@@ -53,21 +53,26 @@ MANAGED_MODES = {"meshap", "meshptp", "meshsta"}   # the dialog applies managedO
 SETTABLE_MODES = MESH_MODES | {"off"}
 MODE_LABELS = {"mesh": "Mesh", "meshap": "Mesh PtMP", "meshptp": "Mesh PtP",
                "meshsta": "Mesh Station", "lan": "LAN Hotspot", "wan": "WAN Client", "off": "Off"}
+# Bumped when reading changes in a way that makes stored radio details wrong; older ones are
+# shown as out of date. 2: 3.25.x channel lists and hostapd-based purposes.
+READER_VERSION = 2
 PERSIST_DIR = "/etc/aredn-fleet-radio"   # on flash: must survive the reboot
 REMOTE_SCRIPT = "/tmp/aredn-fleet-radio.sh"
 RC_LOCAL_LINE = f"[ -x {PERSIST_DIR}/boot-check ] && {PERSIST_DIR}/boot-check &"
 
-# getConfiguration() plus, per radio, which purposes its hardware supports, asked the way the
+# getConfiguration() plus, per radio, which purposes its hardware supports (and whether hostapd
+# exists: 3.25.x dialogs offer PtMP/PtP/Station/LAN/WAN only then, so tiny builds get Mesh/Off), asked the way the
 # node's Radios & Antennas dialog asks (hardware.supportsFeature("wifi-mode", iface, mode)).
 RADIO_STATE_CMD = (
     "ucode -e 'import * as r from \"aredn.radios\"; import * as h from \"aredn.hardware\"; "
+    "import * as fs from \"fs\"; "
     "const c = r.getConfiguration(); const modes = []; "
     "for (let i = 0; i < length(c); i++) { let m = null; "
     "try { if (h.supportsFeature && c[i]) { m = {}; "
     "for (let x in [\"mesh\", \"meshap\", \"meshptp\", \"meshsta\", \"lan\", \"wan\"]) "
     "m[x] = h.supportsFeature(\"wifi-mode\", c[i].iface, x); } } catch (e) { m = null; } "
     "push(modes, m); } "
-    "printf(\"%J\", { config: c, modes: modes });'"
+    "printf(\"%J\", { config: c, modes: modes, hostapd: !!fs.access(\"/usr/sbin/hostapd\") });'"
 )
 # Older (Lua web UI, 3.23 and earlier) firmware: ask the way its Basic Setup page does.
 # Mesh radio from /etc/config.mesh/_setup (wifi_enable/channel/chanbw/ssid), its channel list from
@@ -141,6 +146,8 @@ def channel_table(radio: dict[str, Any], unlicensed: bool = False) -> dict[str, 
     """Width -> channel options, from either firmware's ``getConfiguration()`` format.
 
     * 4.26.x: ``channels`` is ``{width: [{number, label, frequency}]}``.
+    * 3.25.x: ``channels`` is one list without ``widths`` (5/10/20 MHz), plus ``channels40`` and
+      ``channels80``.
     * Nightly/RC (from 20261012): ``channels`` is one list of
       ``{number, label, frequency, widths, unlicensed: {width: limits}, amateur: {width: limits}}``.
       The node's dialog lists every channel whose ``widths`` include the width, and labels it
@@ -148,6 +155,16 @@ def channel_table(radio: dict[str, Any], unlicensed: bool = False) -> dict[str, 
       unlicensed channels are enabled). This builds the same labels.
     """
     chans = radio.get("channels") or {}
+    if isinstance(chans, list) and not any(isinstance(c, dict) and "widths" in c for c in chans):
+        # 3.25.x: one plain list for 5/10/20 MHz, plus ``channels40`` / ``channels80`` (the dialog
+        # picks the list by width the same way).
+        def plain(lst):
+            return [{"number": int(c["number"]), "label": str(c.get("label", c["number"])),
+                     "frequency": int(c.get("frequency") or 0)}
+                    for c in (lst or []) if isinstance(c, dict)]
+        return {str(int(bw)): plain(radio.get("channels40") if int(bw) == 40 else
+                                    radio.get("channels80") if int(bw) == 80 else chans)
+                for bw in (radio.get("bws") or [])}
     if isinstance(chans, dict):
         return {str(bw): [{"number": int(c["number"]), "label": str(c.get("label", c["number"])),
                            "frequency": int(c.get("frequency") or 0)}
@@ -240,7 +257,8 @@ class NodeRadios:
 
     def to_json(self) -> dict[str, Any]:
         return {"radios": [asdict(r) for r in self.radios], "multi_mesh": self.multi_mesh,
-                "read_at": self.read_at, "firmware": self.firmware, "legacy": self.legacy}
+                "read_at": self.read_at, "firmware": self.firmware, "legacy": self.legacy,
+                "reader": READER_VERSION}
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "NodeRadios":
@@ -285,7 +303,8 @@ def parse_radio_inventory(raw: str, caps: str = "unknown", unlicensed: bool = Fa
             managed_oob=[int(x) for x in oob if _int_or_none(x) is not None],
             # The base name of a *mesh* SSID isn't secret; a WAN client's SSID/key are dropped.
             ssid=(str(m.get("ssid")) if m.get("mode") in MESH_MODES and m.get("ssid") else None),
-            modes=_supported_modes(reported[i] if i < len(reported) else None)))
+            modes=_supported_modes(reported[i] if i < len(reported) else None)
+            or (["mesh"] if data.get("hostapd") is False else None)))
     multi = {"multi-mesh": True, "single-mesh": False}.get(caps.strip())
     return NodeRadios(radios, multi)
 

@@ -245,8 +245,12 @@ class AppState:
             "settings": self.settings}, indent=1))
 
     def radios_stale(self, node: str) -> bool:
-        """Radio details read on different firmware than the node runs now."""
+        """Radio details read on different firmware than the node runs now, or by an older
+        version of the reader (e.g. before it understood 3.25.x channel lists)."""
+        from ..jobs.radio import READER_VERSION
         inv, fw = self.radios.get(node) or {}, (self.nodes.get(node) or {}).get("firmware", "")
+        if inv and inv.get("reader", 1) < READER_VERSION:
+            return True
         return bool(inv.get("firmware") and fw and inv["firmware"] != fw)
 
     def set_firmware(self, node: str, version: str) -> None:

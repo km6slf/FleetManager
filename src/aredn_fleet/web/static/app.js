@@ -110,7 +110,7 @@ function renderNodes() {
 
 function rfCell(n) {
   if (n.radios) {
-    const stale = n.radios_stale ? '<span class="chip off" title="Read when the node ran other firmware; channel lists may have changed">out of date — read radios again</span>' : "";
+    const stale = n.radios_stale ? '<span class="chip off" title="Read on other firmware, or by an older Fleet Manager; channel lists may have changed">out of date — read radios again</span>' : "";
     return `<div class="chips">${stale}${n.radios.map((r) => {
       const mesh = ["mesh", "meshap", "meshptp", "meshsta"].includes(r.mode);
       const detail = mesh ? ` · ${esc(r.label)} · ${r.bandwidth} MHz` : "";
@@ -231,7 +231,7 @@ async function loadRadioPanel() {
   const list = (a) => `${a.slice(0, 3).join(", ")}${a.length > 3 ? "…" : ""}`;
   $("#radio-missing span").textContent = [
     fresh.length ? `Radio details not read yet for ${list(fresh)}.` : "",
-    stale.length ? `Out of date after a firmware change for ${list(stale)}.` : "",
+    stale.length ? `Out of date (read on other firmware or by an older Fleet Manager) for ${list(stale)}.` : "",
   ].filter(Boolean).join(" ");
   if (!radioOpts.bands.length && old.length === nodes.length) {
     box.innerHTML = "";

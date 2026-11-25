@@ -447,3 +447,24 @@ def test_supported_modes_come_from_the_node():
         plan_node(i, [BandChange("5GHz", mode="meshap", channel=131, width=20)])
     from aredn_fleet.jobs.radio import NodeRadios
     assert NodeRadios.from_json(i.to_json()).radios[0].modes == i.radios[0].modes
+
+
+def test_3_25_format_and_tiny_build_purposes():
+    """3.25.x getConfiguration(): one plain channel list (5/10/20 MHz) plus channels40/80, no
+    supportsFeature; without hostapd its dialog offers only Off and Mesh (tiny builds)."""
+    import json as _json
+    from aredn_fleet.jobs.radio import parse_radio_inventory
+    ch = [{"number": -2, "label": "-2 (2397)", "frequency": 2397},
+          {"number": 1, "label": "1 (2412)", "frequency": 2412}]
+    cfg = {"iface": "wlan0", "def": {"band": "2.4GHz"}, "bws": [5, 10, 20], "channels": ch,
+           "channels40": [], "channels80": [], "managedOOB": [-4, -3, -2, -1, 0],
+           "mode": {"mode": "mesh", "channel": -2, "bandwidth": 10, "ssid": "AREDN"}}
+    raw = _json.dumps({"config": [cfg], "modes": [None], "hostapd": False})
+    (r,) = parse_radio_inventory(raw).radios
+    assert [c["number"] for c in r.channels["10"]] == [-2, 1]
+    assert r.channels["20"] == r.channels["5"] == r.channels["10"]
+    assert r.label(-2, 10) == "-2 (2397)"
+    assert r.modes == ["mesh"]
+    # with hostapd and no supportsFeature: nothing ruled out
+    raw = _json.dumps({"config": [cfg], "modes": [None], "hostapd": True})
+    assert parse_radio_inventory(raw).radios[0].modes is None
