@@ -8,6 +8,7 @@ server. Tests substitute a fake that implements the same two methods.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
 from dataclasses import dataclass
@@ -149,3 +150,11 @@ def detached(cmd: str, log: str = "/dev/null") -> str:
     does the same job (an ignored signal stays ignored across exec).
     """
     return f"( trap '' HUP; exec {cmd} ) >{log} 2>&1 </dev/null &"
+
+
+def errtext(exc: BaseException) -> str:
+    """An exception as text a person can act on. Timeouts have no message of their own."""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "timed out (no answer from the node)"
+    msg = str(exc).strip()
+    return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__

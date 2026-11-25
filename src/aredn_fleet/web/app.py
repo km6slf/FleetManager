@@ -29,6 +29,7 @@ from ..credentials import Credential, forget_password, store_password
 from ..discovery import crawl
 from ..firmware import Catalog, Channel, FirmwareStore, ReleaseIndex, match_profile, select_channels
 from ..topology import PlanError, plan_rollout
+from ..transport import errtext
 from .state import AppState, Job, JobBusy, radio_options
 
 STATIC = Path(__file__).parent / "static"
@@ -433,7 +434,7 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                         finally:
                             await s.close()
                     except Exception as exc:  # noqa: BLE001
-                        job.log(f"{n}: couldn't read radios ({exc})", "error")
+                        job.log(f"{n}: couldn't read radios ({errtext(exc)})", "error")
                         return
                     state.set_radios(n, inv)
                     ok += 1
@@ -715,7 +716,7 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                         finally:
                             await s.close()
                     except Exception as exc:  # noqa: BLE001
-                        job.log(f"{n}: couldn't read settings ({exc})", "error")
+                        job.log(f"{n}: couldn't read settings ({errtext(exc)})", "error")
                         return
                     state.set_settings(n, ns)
                     ok += 1
