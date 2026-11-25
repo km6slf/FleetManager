@@ -66,8 +66,15 @@ def test_redundant_paths_are_still_caught():
 
 def test_unknown_nightly_is_treated_cautiously():
     b = migration_blocks(chain(), "root", ["edge"], "4.26.10.0",
-                         {"root": BABEL, "mid": BABEL, "edge": UNKNOWN})
-    assert "unknown" in b["edge"]
+                         {"root": BABEL, "mid": BABEL, "edge": UNKNOWN},
+                         versions={"edge": "20250101-abc1234"})
+    assert "unknown for firmware 20250101-abc1234" in b["edge"]
+
+
+def test_firmware_not_read_says_so_not_nightly():
+    b = migration_blocks(chain(), "root", ["edge"], "4.26.10.0",
+                         {"root": BABEL, "mid": BABEL, "edge": UNKNOWN}, versions={"edge": ""})
+    assert "isn't known" in b["edge"] and "nightly" not in b["edge"]
 
 
 def test_blocked_olsr_node_still_protects_its_path():

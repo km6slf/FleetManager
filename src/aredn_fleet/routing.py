@@ -102,7 +102,8 @@ def _reach(topo: Topology, root: str | set[str], ok: set[str],
 
 
 def migration_blocks(topo: Topology, root: str, selected: Iterable[str], target_version: str,
-                     protocols: dict[str, str], exclude_kinds: Iterable[str] = ()) -> dict[str, str]:
+                     protocols: dict[str, str], exclude_kinds: Iterable[str] = (),
+                     versions: dict[str, str] | None = None) -> dict[str, str]:
     """Nodes this upgrade must not touch because of routing, with the reason.
 
     Judged on the mesh as it will be once every selected node runs ``target_version``.
@@ -122,8 +123,13 @@ def migration_blocks(topo: Topology, root: str, selected: Iterable[str], target_
                          "off from its neighbours. Upgrade it to an OLSR + Babel release "
                          "(3.25.5.0 or later 3.25.x) first.")
         elif now[n] == UNKNOWN:
-            blocks[n] = ("routing protocol unknown (nightly firmware): check that it runs Babel "
-                         "before moving it to Babel-only firmware.")
+            v = (versions or {}).get(n, "")
+            if not v:
+                blocks[n] = ("its firmware isn't known (its status page couldn't be read), so "
+                             "its routing can't be checked. Run Discover mesh again, then retry.")
+            else:
+                blocks[n] = (f"routing protocol unknown for firmware {v}: check that it runs "
+                             "Babel before moving it to Babel-only firmware.")
 
     # An OLSR-only node is part of the mesh while it can reach an OLSR + Babel node (the bridge
     # to the Babel side) through nodes that speak OLSR.

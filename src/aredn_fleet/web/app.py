@@ -374,12 +374,30 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             for ap, sta in ptmp_pairs(state.topology.links, state.radios):
                 aps.setdefault(sta, set()).add(ap)
             # OLSR -> Babel: judged on the whole mesh (each node's protocol from its firmware).
+            # Nodes discovery couldn't read have no firmware on record; ask them now, so the
+            # routing check is based on what they run rather than on a gap.
+            unknown_fw = [n for n in state.topology.nodes
+                          if not (state.nodes.get(n) or {}).get("firmware")]
+            if unknown_fw:
+                infos = await asyncio.gather(*(state.sysinfo(n) for n in unknown_fw))
+                for n, si in zip(unknown_fw, infos):
+                    fw = ((si or {}).get("node_details") or {}).get("firmware_version")
+                    if fw:
+                        state.nodes.setdefault(n, {})["firmware"] = str(fw)
+                        model = ((si or {}).get("node_details") or {}).get("model")
+                        if model and not state.nodes[n].get("model"):
+                            state.nodes[n]["model"] = str(model)
+                        state.errors.pop(n, None)
+                        job.log(f"{n}: firmware {fw} (read now; discovery couldn't)")
+                state.save_topology()
             await tiny_check(mark_tiny_builds, list(state.topology.nodes))
             protocols = {n: routing_of((state.nodes.get(n) or {}).get("firmware", ""),
                                        n not in state.no_babel)
                          for n in state.topology.nodes}
             blocked = migration_blocks(state.topology, state.root or "", req.nodes, release.version,
-                                       protocols, ("TUN",) if req.exclude_tunnels else ())
+                                       protocols, ("TUN",) if req.exclude_tunnels else (),
+                                       versions={n: (state.nodes.get(n) or {}).get("firmware", "")
+                                                 for n in state.topology.nodes})
             for n, why in sorted(blocked.items()):
                 job.log(f"{n}: {why}", "warn")
             index = ReleaseIndex(Catalog(state.mirror), state.fw_dir / "catalog")
