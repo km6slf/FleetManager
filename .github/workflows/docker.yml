@@ -99,6 +99,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Start the Docker engine (installed on the runner, not always running)
+        shell: pwsh
+        run: |
+          $s = Get-Service docker -ErrorAction SilentlyContinue
+          if (-not $s) { throw "Docker isn't installed on this runner image" }
+          if ($s.Status -ne "Running") { Start-Service docker }
+          foreach ($i in 1..30) { docker version 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 2 }
+          docker version
+
       - name: Build
         run: docker build -f Dockerfile.windows --build-arg WINDOWS_VERSION=ltsc2022 -t fleet-test:windows .
 
