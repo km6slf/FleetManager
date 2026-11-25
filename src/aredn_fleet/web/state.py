@@ -219,6 +219,9 @@ class AppState:
         self.errors = data.get("errors", {})
         self.radios = data.get("radios", {})
         self.settings = data.get("settings", {})
+        if data.get("mesh_dns"):
+            from .. import meshdns
+            meshdns.set_server(data["mesh_dns"])
 
     def set_discovery(self, topo: Topology, infos: dict[str, NodeInfo], errors: dict[str, str],
                       root: str) -> None:
@@ -242,7 +245,7 @@ class AppState:
             "nodes": sorted(self.topology.nodes), "links": [l.__dict__ for l in self.topology.links],
             "info": self.nodes, "errors": self.errors, "root": self.root,
             "discovered_at": self.discovered_at, "radios": self.radios,
-            "settings": self.settings}, indent=1))
+            "settings": self.settings, "mesh_dns": _mesh_dns()}, indent=1))
 
     def radios_stale(self, node: str) -> bool:
         """Radio details read on different firmware than the node runs now, or by an older
@@ -300,6 +303,11 @@ class AppState:
             })
         return {"root": self.root, "discovered_at": self.discovered_at, "nodes": nodes,
                 "links": [l.__dict__ for l in self.topology.links]}
+
+
+def _mesh_dns() -> str | None:
+    from .. import meshdns
+    return meshdns.server()
 
 
 async def sysinfo_or_none(node: str) -> dict[str, Any] | None:

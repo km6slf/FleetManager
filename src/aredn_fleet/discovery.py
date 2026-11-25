@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import socket
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from . import meshdns
 from .topology import Topology
 
 MESH_SUFFIX = ".local.mesh"
@@ -52,6 +54,7 @@ SYSINFO_PATHS = (
 
 def http_fetch(node: str, timeout: float = 8.0) -> dict[str, Any]:
     host = node if "." in node else node + MESH_SUFFIX
+    host = meshdns.address(host)      # mesh names are looked up on the mesh node, not Windows' DNS
     last: Exception | None = None
     for path in SYSINFO_PATHS:
         try:
@@ -111,6 +114,16 @@ class DiscoveryResult:
     start: str = ""  # real name of the node discovery started from (the manager's root)
 
 
+def _system_address(node: str) -> str | None:
+    """The address the system resolver gives the start node (fallback mesh DNS server)."""
+    if meshdns.is_ip(node):
+        return node
+    try:
+        return socket.gethostbyname(node if "." in node else node + MESH_SUFFIX)
+    except OSError:
+        return None
+
+
 def crawl(start: str = "localnode", fetch: Fetcher = http_fetch, workers: int = 8,
           max_nodes: int = 1000) -> DiscoveryResult:
     topo = Topology()
@@ -123,10 +136,17 @@ def crawl(start: str = "localnode", fetch: Fetcher = http_fetch, workers: int = 
         except (urllib.error.URLError, OSError, ValueError) as exc:
             return name, None, str(exc)
 
-    # The start alias (e.g. "localnode") resolves to a real node name.
-    _, parsed, err = one(start)
+    # The start alias (e.g. "localnode") resolves to a real node name. Its status also says
+    # which address to ask for mesh names from here on (its LAN address).
+    try:
+        data = fetch(start)
+        parsed, err = parse_node(data), None
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        data, parsed, err = None, None, str(exc)
     if parsed is None:
         raise ConnectionError(f"cannot reach {start}: {err}")
+    if fetch is http_fetch:
+        meshdns.learn_from(data, _system_address(start))
     first, _ = parsed
     seen = {start, first.name}
     frontier = [first.name]

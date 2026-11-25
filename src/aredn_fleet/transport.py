@@ -82,7 +82,7 @@ class HostKeyChanged(Exception):
     pass
 
 
-async def pin_host_key(host: str, known_hosts: Path) -> None:
+async def pin_host_key(host: str, known_hosts: Path, addr: str | None = None) -> None:
     """Trust on first use, then pin.
 
     AREDN keeps /etc/dropbear/*host_key in its sysupgrade keep list (seen on a
@@ -97,12 +97,25 @@ async def pin_host_key(host: str, known_hosts: Path) -> None:
                                     for line in known_hosts.read_text().splitlines()):
         return
     import asyncio
-    key = await asyncio.wait_for(asyncssh.get_server_host_key(host, AREDN_SSH_PORT), timeout=20)
+    key = await asyncio.wait_for(asyncssh.get_server_host_key(addr or host, AREDN_SSH_PORT),
+                                 timeout=20)
     if key is None:
         raise ConnectionError(f"{host}: no SSH host key offered")
     known_hosts.parent.mkdir(parents=True, exist_ok=True)
     with known_hosts.open("a") as f:
         f.write(f"{entry} {key.export_public_key('openssh').decode().strip()}\n")
+
+
+def _pinned_keys(host: str, known_hosts: Path):
+    """The host keys pinned for ``host`` (by name), for asyncssh's ``known_hosts`` check."""
+    import asyncssh
+    entry = f"[{host}]:{AREDN_SSH_PORT}"
+    keys = []
+    for line in known_hosts.read_text().splitlines() if known_hosts.exists() else []:
+        parts = line.split(" ", 1)
+        if len(parts) == 2 and parts[0] == entry:
+            keys.append(asyncssh.import_public_key(parts[1].strip()))
+    return (keys, [], [])
 
 
 def _connect_kwargs(cred: Credential, known_hosts: Path) -> dict:
@@ -125,12 +138,18 @@ async def connect(node: str, store: CredentialStore, host_suffix: str = ".local.
     """Try each credential in turn and remember the first that works."""
     import asyncssh  # optional dependency: pip install aredn-fleet[ssh]
 
+    from . import meshdns
     host = node + host_suffix
-    await pin_host_key(host, known_hosts)
+    # Connect to the address the mesh node gives (not Windows' DNS), but pin and check the host
+    # key under the node's name, so an address change doesn't look like a different node.
+    addr = await asyncio.to_thread(meshdns.address, host)
+    await pin_host_key(host, known_hosts, addr)
+    pinned = _pinned_keys(host, known_hosts)
     errors = []
     for cred in store.order_for(node):
         try:
-            conn = await asyncssh.connect(host, **_connect_kwargs(cred, known_hosts))
+            conn = await asyncssh.connect(addr, **{**_connect_kwargs(cred, known_hosts),
+                                                   "known_hosts": pinned})
         except asyncssh.HostKeyNotVerifiable as exc:
             raise HostKeyChanged(
                 f"{node}: host key does not match {known_hosts}; refusing to connect. "
