@@ -26,6 +26,7 @@ Safe, bulk updating of AREDN nodes. Inspired by the "Fleet Manager … doesn't e
 
 ## Discovery
 * Crawl `http://<node>.local.mesh/cgi-bin/sysinfo.json?link_info=1` breadth-first from `localnode`. No credentials are needed.
+* **Mesh names are looked up on the mesh** (`meshdns.py`), inside Fleet Manager only: with Wi-Fi or a VPN up, Windows may ask the home router for `*.local.mesh` first, which stalled status reads and SSH logins on the bench. Fleet Manager asks the node it reaches the mesh through (its `br-lan` address from the first node's status, else the address `localnode` resolved to; remembered with the topology; `AREDN_FLEET_DNS` overrides) and connects to the address it returns. The PC's DNS settings are untouched; other names, `localnode` itself, and names the mesh doesn't answer use the system resolver. SSH host keys stay pinned by node name.
 * The edge type comes from `linkType` (RF, DTD, TUN, …). Tunnels can be left out of planning (`--exclude TUN`) when they shouldn't be trusted during a rollout.
 * Planned: cross-check against Babel's routing table over SSH, and keep traceroute (`traceroute` on the node, or from the host) as a diagnostic for links that disagree.
 
