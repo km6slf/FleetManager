@@ -84,11 +84,11 @@ Status reads try `/a/sysinfo` first, then `/cgi-bin/sysinfo.json`, then port 808
 * **Older upgrade procedure**, told apart by the node's own `aredn_sysupgrade` (newer ones archive the settings themselves). For older ones Fleet Manager does what the node's Firmware page does with "Keep settings":
   1. archive every existing path in `/etc/arednsysupgrade.conf` into `/tmp/arednsysupgradebackup.tgz` (a copy is saved on this computer as the backup);
   2. check the image with `validate_firmware_image` and the node's `firmwarecheck.sh` after dropping caches;
-  3. detached: set `nodeupgraded` with the node's own Lua (`aredn.info.set_nvram`), stop the services listed in the node's `upgrade_prepare.sh` except dropbear (so a failure can still be read), then `aredn_sysupgrade -f <archive> -q <image>`. If sysupgrade returns, nothing was flashed: the flag and services are restored;
+  3. detached: set `nodeupgraded` with the node's own Lua (`aredn.info.set_nvram`), stop the services listed in the node's `upgrade_prepare.sh` except dropbear (so a failure can still be read), then `aredn_sysupgrade -f <archive> -q <image>`. On this firmware a successful hand-off still *returns*: procd (PID 1) execs the stage-2 upgrader, cutting off sysupgrade's ubus call ("Connection failed", 246). So the flag and services are restored only if PID 1 is still `procd` a few seconds later (the first real run undid a good hand-off and deleted the image stage 2 needed; the node rebooted unchanged);
   4. wait through the second reboot older firmware does to apply the kept settings, then verify as usual.
 * **Settings on older nodes** go through the node's own **Advanced Configuration** page (`/www/cgi-bin/advancedconfig`, Lua). Its `settings` table gives each entry's key (uci option), type, condition, callbacks and `needreboot`. Showing the page (a plain GET over SSH) lists only the settings whose condition holds on that node, with current values. Saving POSTs `button_save_<n>` / `newval_<n>` to the same page, so the node runs its own callbacks (e.g. `node-setup -a mesh`) exactly as its Save button would; the page is read back to confirm. Only real on/off uci settings are offered: text fields, actions (`aredn.olsr.restart`) and the dangerous-upgrade switch never are. Rows merge with newer firmware by setting name (e.g. `lan_dhcp_route`). When the page flags a reboot, the review says so and the result lists the nodes to reboot (Fleet Manager doesn't reboot them).
 * On every firmware, switches that could cut Fleet Manager off (`ssh_access`) are shown but not changed in bulk.
-* Radio changes need the ucode web UI (3.25.5+); for older nodes Read radios says so and skips them.
+* Radio changes need the ucode web UI (3.25.5+). Older nodes can still be **read** (view only): the mesh radio from `/etc/config.mesh/_setup`, its channels from `aredn.hardware.get_rfchannels` and widths from `get_rfbandwidths`, as their Basic Setup page does; a second radio reports its purpose only.
 * **Field check (2026-11-24):** NanoStation M2 XM on 3.23.8.0 (Lua UI, `olsrd` with jsoninfo on 9090, DtD on IPv4 `/8`, IPv6 off, 28 MB RAM / 13.8 MB `/tmp`). Cabled to the Babel-only hAP's DtD port, neither saw the other: the hAP's DtD bridge has no IPv4 address.
 
 ## Radio settings (channel / width / mode)
@@ -274,7 +274,7 @@ A **New device** tab walks through putting AREDN on hardware for the first time 
 * [x] Babel badge; backup files named for the node
 * [x] New device wizard: hardware picker from AREDN's catalog, method per hardware, images downloaded and renamed, step-by-step guide, look-for-the-node check
 * [ ] Wizard automation: TFTP push, network-boot server, stage-2 upload
-* [ ] First real upgrade of an older node (NanoStation M2 XM 3.23.8.0 → 3.25.5.1)
+* [x] First real upgrade of an older node (NanoStation M2 XM 3.23.8.0 → 3.25.5.1): flashed and kept its settings; fixes from it: stage-2 hand-off, `/a/sysinfo` HTML-200 fallback, tiny builds labelled OLSR
 * [ ] Radio job on the bench node (needs 2 nodes for a real link test)
 * [x] Nightly recon (3 passes): new channel-list format and setter names supported
 * [ ] Multi-channel Mesh Stations (`radioN_channels`)
