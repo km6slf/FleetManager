@@ -37,7 +37,7 @@ Because settings and their labels are read from the nodes rather than built in, 
 
 ## Install
 ### Windows
-Download from [Releases](https://github.com/km6slf/FleetManager/releases), or from the **Artifacts** of the latest run under the Actions tab (every push to `main` builds both):
+Download from [Releases](https://github.com/km6slf/FleetManager/releases): a numbered release (for example [v0.1.0-alpha.1](https://github.com/km6slf/FleetManager/releases/tag/v0.1.0-alpha.1)), or the [Development build](https://github.com/km6slf/FleetManager/releases/tag/dev-build), which is replaced by every build of `main` (newest, least tested). Each has two files:
 - **`AREDN-Fleet-Manager-<version>-setup.exe`**: installs for your user (no admin rights), adds a Start-menu shortcut.
 - **`AREDN-Fleet-Manager-<version>-portable-win64.zip`**: no install. Unzip anywhere (even a USB stick) and run `AREDN-Fleet-Manager.exe`. Everything stays in a `data` folder beside it.
 

@@ -1,8 +1,9 @@
 name: Build Windows app
 
-# Builds the installer and the portable zip on every push to main (downloadable
-# from the run's Artifacts), and attaches them to a GitHub Release when a tag
-# like v0.2.0 is pushed.
+# Builds the installer and the portable zip on every push to main, and publishes them:
+# - every main build replaces the files on the "Development build (latest main)"
+#   pre-release (tag dev-build), so the newest build is always at one public link;
+# - a tag like v0.2.0 (or v0.2.0-alpha.1, published as a pre-release) gets its own release.
 on:
   push:
     branches: [main]
@@ -84,3 +85,24 @@ jobs:
           generate_release_notes: true
           # v1.2.3-alpha.1, -beta.2, -rc.1 ... are published as pre-releases
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+      - name: Publish the development build
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          title="Development build (latest main)"
+          notes="Built automatically from main at ${GITHUB_SHA::7}: $(git log -1 --format=%s). For testing only; it may be broken. Versioned releases are listed at https://github.com/${GITHUB_REPOSITORY}/releases"
+          git tag -f dev-build "$GITHUB_SHA"
+          git push -f origin refs/tags/dev-build
+          if gh release view dev-build >/dev/null 2>&1; then
+            gh release edit dev-build --prerelease --title "$title" --notes "$notes"
+            gh release view dev-build --json assets -q '.assets[].name' | while read -r a; do
+              [ -n "$a" ] && gh release delete-asset dev-build "$a" -y
+            done
+          else
+            gh release create dev-build --prerelease --title "$title" --notes "$notes" --verify-tag
+          fi
+          gh release upload dev-build dist/*-setup.exe dist/*-portable-win64.zip --clobber
