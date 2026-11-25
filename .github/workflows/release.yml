@@ -82,3 +82,5 @@ jobs:
             dist/*-setup.exe
             dist/*-portable-win64.zip
           generate_release_notes: true
+          # v1.2.3-alpha.1, -beta.2, -rc.1 ... are published as pre-releases
+          prerelease: ${{ contains(github.ref_name, '-') }}
