@@ -50,12 +50,18 @@ from ..transport import NodeSession, detached
 
 MESH_MODES = {"mesh", "meshap", "meshptp", "meshsta"}
 MANAGED_MODES = {"meshap", "meshptp", "meshsta"}   # the dialog applies managedOOB to these
-SETTABLE_MODES = MESH_MODES | {"off"}
+HOTSPOT_MODES = {"lan", "wan"}                      # LAN Hotspot (AP), WAN Client
+SETTABLE_MODES = MESH_MODES | HOTSPOT_MODES | {"off"}
+ENCRYPTIONS = {"psk2": "WPA2 PSK", "psk": "WPA PSK", "none": "None"}
+# The node's dialog: 1-32 characters, none of ! # ; + ] / " tab at the start, none of + ] / " tab
+# inside, and no space or ! # ; at the end.
+AP_SSID_RE = re.compile(r'[^!#;+\]/"\t][^+\]/"\t]{0,30}[^ !#;+\]/"\t]|[^ !#;+\]/"\t]')
 MODE_LABELS = {"mesh": "Mesh", "meshap": "Mesh PtMP", "meshptp": "Mesh PtP",
                "meshsta": "Mesh Station", "lan": "LAN Hotspot", "wan": "WAN Client", "off": "Off"}
 # Bumped when reading changes in a way that makes stored radio details wrong; older ones are
 # shown as out of date. 2: 3.25.x channel lists and hostapd-based purposes.
-READER_VERSION = 2
+# 3: hotspot channel lists, hotspot SSID and security.
+READER_VERSION = 3
 PERSIST_DIR = "/etc/aredn-fleet-radio"   # on flash: must survive the reboot
 REMOTE_SCRIPT = "/tmp/aredn-fleet-radio.sh"
 RC_LOCAL_LINE = f"[ -x {PERSIST_DIR}/boot-check ] && {PERSIST_DIR}/boot-check &"
@@ -194,6 +200,49 @@ def channel_table(radio: dict[str, Any], unlicensed: bool = False) -> dict[str, 
     return table
 
 
+def hotspot_table(radio: dict[str, Any]) -> list[dict[str, Any]]:
+    """The channels the node's dialog offers for a LAN Hotspot on this radio.
+
+    * Nightly/RC: channels above 0 that are allowed for unlicensed use at 20 MHz, labelled with
+      their number and ``[dfs, indoor]``.
+    * 4.26.x: the 20 MHz list (``channels["20"]``), labelled with their number.
+    * 3.25.x: the whole channel list, labelled with their number.
+    """
+    chans = radio.get("channels") or {}
+    out = []
+    if isinstance(chans, dict):
+        lst = chans.get("20") or []
+    elif any(isinstance(c, dict) and "widths" in c for c in chans):
+        lst = []
+        for c in chans:
+            u = (c.get("unlicensed") or {}).get("20") if isinstance(c, dict) else None
+            if isinstance(c, dict) and int(c.get("number", 0)) > 0 and u is not None:
+                limits = (["dfs"] if (u or {}).get("DFS") else []) + \
+                    (["indoor"] if (u or {}).get("NO_OUTDOOR") else [])
+                lst.append({**c, "label": f"{c['number']}" + (f" [{', '.join(limits)}]" if limits else "")})
+    else:
+        lst = chans
+    for c in lst:
+        if isinstance(c, dict) and _int_or_none(c.get("number")) is not None:
+            out.append({"number": int(c["number"]), "label": str(c.get("label") if "widths" in c
+                                                                  else c["number"]),
+                        "frequency": int(c.get("frequency") or 0)})
+    return out
+
+
+def _unhex(v: Any) -> str | None:
+    """The node keeps hotspot / client SSIDs hex-encoded (``hexenc``)."""
+    try:
+        return bytes.fromhex(str(v)).decode("utf-8") if v else None
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def hexenc(text: str) -> str:
+    """As the node's ``hexenc``: UTF-8 bytes as lowercase hex."""
+    return text.encode("utf-8").hex()
+
+
 def band_of(radio: dict[str, Any]) -> str:
     """The radio's band as the node reports it ("2.4GHz", "5GHz", "900MHz", ...), else from frequency."""
     b = str(((radio.get("def") or {}).get("band") or "")).replace(" ", "")
@@ -223,6 +272,14 @@ class RadioInfo:
     # Purposes this radio's hardware supports, as the node reports them; None = the firmware
     # didn't say (older firmware), so nothing is ruled out on that basis.
     modes: list[str] | None = None
+    lan_channels: list[dict[str, Any]] = field(default_factory=list)   # hotspot channel choices
+    ap_ssid: str | None = None       # a LAN Hotspot's network name (it broadcasts it anyway)
+    encryption: str | None = None    # a LAN Hotspot's security: psk2 / psk / none
+    # Never kept: Wi-Fi passwords, and a WAN Client's network name (someone's home network).
+
+    def lan_frequency(self, ch: int) -> int | None:
+        return next((int(c["frequency"]) or None for c in self.lan_channels
+                     if int(c["number"]) == int(ch)), None)
 
     def channel_options(self, mode: str, bw: int | str) -> list[dict[str, Any]]:
         """Exactly the options the node's own Channel dropdown shows for this mode and width."""
@@ -303,6 +360,9 @@ def parse_radio_inventory(raw: str, caps: str = "unknown", unlicensed: bool = Fa
             managed_oob=[int(x) for x in oob if _int_or_none(x) is not None],
             # The base name of a *mesh* SSID isn't secret; a WAN client's SSID/key are dropped.
             ssid=(str(m.get("ssid")) if m.get("mode") in MESH_MODES and m.get("ssid") else None),
+            lan_channels=hotspot_table(r),
+            ap_ssid=_unhex(m.get("ssid")) if m.get("mode") == "lan" else None,
+            encryption=(str(m.get("encryption") or "none") if m.get("mode") == "lan" else None),
             modes=_supported_modes(reported[i] if i < len(reported) else None)
             or (["mesh"] if data.get("hostapd") is False else None)))
     multi = {"multi-mesh": True, "single-mesh": False}.get(caps.strip())
@@ -356,10 +416,38 @@ class BandChange:
     width: int | None = None
     peer: str | None = None         # required for meshptp
     ssid: str | None = None         # mesh SSID base, e.g. "AREDN" (node appends -<bw>-v3)
+    # LAN Hotspot / WAN Client: the network's name, a hotspot's security, and the password.
+    # key=None keeps the node's current password; "" means none (an open network).
+    ap_ssid: str | None = None
+    encryption: str | None = None
+    key: str | None = field(default=None, repr=False)
+
+    def redacted(self) -> dict[str, Any]:
+        """For logs: passwords never, a WAN Client's network name never."""
+        d = asdict(self)
+        if d.get("key") is not None:
+            d["key"] = "(hidden)"
+        if self.mode == "wan" and d.get("ap_ssid"):
+            d["ap_ssid"] = "(hidden)"
+        return d
 
     def validate(self) -> None:
         if self.mode is not None and self.mode not in SETTABLE_MODES:
             raise ValueError(f"{self.band}: mode must be one of {sorted(SETTABLE_MODES)}")
+        if self.ap_ssid is not None and not AP_SSID_RE.fullmatch(self.ap_ssid):
+            raise ValueError(f"{self.band}: network name must be 1-32 characters, without + ] / \" "
+                             "or tabs, not starting with ! # ; and not ending with a space")
+        if self.encryption is not None and self.encryption not in ENCRYPTIONS:
+            raise ValueError(f"{self.band}: security must be WPA2 PSK, WPA PSK or None")
+        if self.key and not 8 <= len(self.key) <= 32:
+            raise ValueError(f"{self.band}: Wi-Fi password must be 8-32 characters")
+        if self.key and any(ord(ch) < 32 or ord(ch) > 126 for ch in self.key):
+            raise ValueError(f"{self.band}: Wi-Fi password must be printable ASCII characters")
+        if self.mode in ("lan", "wan") and (self.width is not None or self.ssid or self.peer):
+            raise ValueError(f"{self.band}: {MODE_LABELS[self.mode]} takes a network name, "
+                             "password and (hotspot) channel, not a mesh width, SSID or peer")
+        if self.mode == "wan" and self.channel is not None:
+            raise ValueError(f"{self.band}: a WAN Client follows its access point's channel")
         if self.mode == "meshptp" and not self.peer:
             raise ValueError(f"{self.band}: Mesh PtP needs the peer's MAC address")
         if self.peer and not re.fullmatch(r"[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}", self.peer):
@@ -367,7 +455,8 @@ class BandChange:
         if self.ssid is not None and not SSID_RE.fullmatch(self.ssid):
             raise ValueError(f"{self.band}: SSID must be 1-20 letters, digits, '-', '_' or '.' "
                              f"(the node adds -<width>-v3)")
-        if self.mode is None and self.channel is None and self.width is None and self.ssid is None:
+        if self.mode is None and all(getattr(self, k) is None for k in
+                                     ("channel", "width", "ssid", "ap_ssid", "encryption", "key")):
             raise ValueError(f"{self.band}: nothing to change")
 
 
@@ -386,9 +475,12 @@ def merge_changes(group: list[BandChange], custom: dict[str, dict[str, Any]] | N
     out: dict[str, BandChange] = {c.band: c for c in group if c.band not in custom}
     for band, vals in custom.items():
         out[band] = BandChange(band, **{k: (vals.get(k) if vals.get(k) not in ("",) else None)
-                                       for k in ("mode", "channel", "width", "peer", "ssid")})
+                                       for k in ("mode", "channel", "width", "peer", "ssid",
+                                                 "ap_ssid", "encryption")},
+                               key=vals.get("key"))   # "" (open network) is kept as ""
     return [c for c in out.values()
-            if any(getattr(c, k) is not None for k in ("mode", "channel", "width", "ssid"))]
+            if any(getattr(c, k) is not None for k in ("mode", "channel", "width", "ssid",
+                                                        "ap_ssid", "encryption", "key"))]
 
 
 def validate_changes(changes: list[BandChange]) -> None:
@@ -424,9 +516,13 @@ def plan_node(inv: NodeRadios, changes: list[BandChange]) -> NodePlan:
             plan.notes.append(f"no {band_label(ch.band)} radio; skipped")
             continue
         mode = ch.mode or r.mode
-        if mode not in MESH_MODES and mode != "off":
-            raise ValueError(f"{ch.band} radio is a {MODE_LABELS.get(mode, mode)}; the fleet "
-                             f"manager only changes mesh radios (or turns them off)")
+        if mode not in SETTABLE_MODES:
+            raise ValueError(f"{ch.band} radio is in {MODE_LABELS.get(mode, mode)} mode, which "
+                             "the fleet manager doesn't change")
+        if (ch.ap_ssid is not None or ch.encryption is not None or ch.key is not None) \
+                and mode not in HOTSPOT_MODES:
+            raise ValueError(f"{band_label(ch.band)}: a network name, security or password "
+                             "only applies to a LAN Hotspot or WAN Client")
         if ch.mode and ch.mode != "off" and r.modes is not None and ch.mode not in r.modes:
             raise ValueError(f"{band_label(ch.band)}: this radio doesn't support "
                              f"{MODE_LABELS.get(ch.mode, ch.mode)} (the node offers "
@@ -469,6 +565,68 @@ def plan_node(inv: NodeRadios, changes: list[BandChange]) -> NodePlan:
                                     "frequency": r.frequency(channel, width), "width": width,
                                     "ssid": full_ssid(ssid, mode, channel, width, ch.band) if ssid else None})
             plan.final[r.index] = (mode, channel, width, ssid)
+        elif mode == "lan":
+            if ch.width is not None:
+                raise ValueError(f"{band_label(ch.band)} radio is a LAN Hotspot: it runs at "
+                                 "20 MHz, so a width doesn't apply")
+            if band_label(ch.band).startswith("900"):
+                raise ValueError(f"{band_label(ch.band)}: hotspots on 900 MHz radios aren't "
+                                 "supported by the fleet manager yet; use the node's own page")
+            allowed = [int(c["number"]) for c in r.lan_channels]
+            channel = ch.channel if ch.channel is not None else (
+                r.channel if r.mode == "lan" else None)
+            if channel is None:
+                raise ValueError(f"{band_label(ch.band)}: choose a channel for the hotspot")
+            if channel not in allowed:
+                raise ValueError(f"{band_label(ch.band)}: channel {channel} isn't offered for a "
+                                 "LAN Hotspot on this radio")
+            enc = ch.encryption or (r.encryption if r.mode == "lan" else None)
+            if enc is None:
+                raise ValueError(f"{band_label(ch.band)}: choose the hotspot's security "
+                                 "(WPA2 PSK, WPA PSK or None)")
+            ap_ssid = ch.ap_ssid or (r.ap_ssid if r.mode == "lan" else None)
+            if not ap_ssid:
+                raise ValueError(f"{band_label(ch.band)}: the hotspot needs a network name")
+            # A password is needed whenever it's protected and the node's current one can't be
+            # kept: on entering hotspot mode, or when the security changes.
+            if enc != "none" and not ch.key and (mode_changed or enc != r.encryption):
+                raise ValueError(f"{band_label(ch.band)}: a protected hotspot needs a password "
+                                 "(8-32 characters)")
+            if mode_changed:
+                plan.sets.append((r.index, "mode", "lan"))
+            if mode_changed or channel != r.channel:
+                plan.sets.append((r.index, "channel", str(int(channel))))
+            if mode_changed or ap_ssid != r.ap_ssid:
+                plan.sets.append((r.index, "ssid", hexenc(ap_ssid)))
+            if mode_changed or enc != r.encryption:
+                plan.sets.append((r.index, "encryption", enc))
+            if ch.key is not None and enc != "none":
+                plan.sets.append((r.index, "key", hexenc(ch.key)))
+            if len(plan.sets) > before:
+                plan.expect.append({"iface": r.iface, "band": ch.band, "mode": "lan",
+                                    "frequency": r.lan_frequency(channel), "ssid": ap_ssid})
+            plan.final[r.index] = ("lan", channel, None, ap_ssid)
+        elif mode == "wan":
+            if ch.channel is not None or ch.width is not None:
+                raise ValueError(f"{band_label(ch.band)} radio is a WAN Client: it follows its "
+                                 "access point's channel, so a channel or width doesn't apply")
+            if mode_changed and not ch.ap_ssid:
+                raise ValueError(f"{band_label(ch.band)}: a WAN Client needs the network name "
+                                 "to join")
+            if ch.ap_ssid and ch.key is None:
+                raise ValueError(f"{band_label(ch.band)}: give the network's password, or say "
+                                 "it has none")
+            if mode_changed:
+                plan.sets.append((r.index, "mode", "wan"))
+            if ch.ap_ssid:
+                plan.sets.append((r.index, "ssid", hexenc(ch.ap_ssid)))
+            if ch.key is not None:
+                plan.sets.append((r.index, "key", hexenc(ch.key) if ch.key else ""))
+            if len(plan.sets) > before:
+                # Joined the network: client mode, associated with that network name.
+                plan.expect.append({"iface": r.iface, "band": ch.band, "mode": "wan",
+                                    "ssid": ch.ap_ssid, "need_ssid": bool(ch.ap_ssid)})
+            plan.final[r.index] = ("wan", None, None, None)
         elif mode == "off" and mode_changed:
             plan.sets.append((r.index, "mode", "off"))
             plan.expect.append({"iface": r.iface, "band": ch.band, "mode": "off"})
@@ -476,10 +634,28 @@ def plan_node(inv: NodeRadios, changes: list[BandChange]) -> NodePlan:
         final_modes[r.index] = mode
         if len(plan.sets) == before:
             plan.notes.append(f"{ch.band} already set that way")
+    if sum(1 for m in final_modes.values() if m == "wan") > 1:
+        raise ValueError("only one radio can be a WAN Client")
     if sum(1 for m in final_modes.values() if m in MESH_MODES) > 1 and inv.multi_mesh is not True:
         raise ValueError("this firmware can't run mesh on two radios at once "
                          "(AREDN's release candidate / nightly can)")
     return plan
+
+
+def safe_sets(plan: NodePlan) -> list[tuple[int, str, str]]:
+    """The settings with passwords and WAN Client network names hidden, for logs and screens.
+    A hotspot's network name is shown readably (it's broadcast anyway)."""
+    out = []
+    for i, k, v in plan.sets:
+        mode = (plan.final.get(i) or ("",))[0]
+        if k == "key":
+            v = "(password hidden)" if v else "(no password)"
+        elif k == "ssid" and mode == "wan":
+            v = "(network name hidden)"
+        elif k == "ssid" and mode == "lan":
+            v = _unhex(v) or v
+        out.append((i, k, v))
+    return out
 
 
 LINK_CLASS = {"mesh": "adhoc", "meshap": "ptmp", "meshsta": "ptmp", "meshptp": "ptp"}
@@ -543,9 +719,11 @@ def build_apply_script(sets: list[tuple[int, str, str]], apply_at: int, revert_a
     from ``/etc/rc.local`` (in the sysupgrade keep list) at boot. It counts from
     boot, not wall-clock time, so it doesn't depend on NTP being up yet.
     """
-    for _, k, v in sets:  # values are whitelisted or numeric; keep it that way
-        if not re.fullmatch(r"[A-Za-z0-9:._-]+", v) or not re.fullmatch(r"[a-z_]+", k):
-            raise ValueError(f"refusing unsafe setting {k}={v!r}")
+    for _, k, v in sets:  # values are whitelisted, numeric or hex; keep it that way
+        empty_ok = k == "key"          # an open WAN network has no password
+        if not re.fullmatch(r"[A-Za-z0-9:._-]*" if empty_ok else r"[A-Za-z0-9:._-]+", v) \
+                or not re.fullmatch(r"[a-z_]+", k):
+            raise ValueError(f"refusing unsafe setting {k}")
     # 4.26.x has setSetting(); the nightly/RC renamed it setSettingAsString() and added list
     # settings. Setting a channel clears radioN_channels (multi-channel Mesh Station), as the
     # node's own dialog does.
@@ -620,7 +798,7 @@ def cleanup_command() -> str:
 
 # --------------------------------------------------------------------------- live checks
 
-IW_TYPE = {"mesh": "IBSS", "meshap": "AP", "meshsta": "managed"}
+IW_TYPE = {"mesh": "IBSS", "meshap": "AP", "meshsta": "managed", "lan": "AP", "wan": "managed"}
 
 
 def iw_state(output: str) -> dict[str, Any]:
@@ -646,6 +824,9 @@ def expectation_met(exp: dict[str, Any], iw_out: str) -> bool:
     if want and s.get("type") != want:
         return False
     # A station may not be associated yet (no ssid line); otherwise the SSID must match.
+    # A WAN Client must have joined its network (its ssid line is the network's name).
+    if exp.get("need_ssid") and s.get("ssid") != exp.get("ssid"):
+        return False
     if exp.get("ssid") and s.get("ssid") not in (None, exp["ssid"]):
         return False
     # 5/10 MHz are a driver setting that iw may report as 20 MHz; only check >= 20.
@@ -689,8 +870,17 @@ class RadioReport:
     reason: str = ""
 
 
-def _radio_view(r: RadioInfo, mode: str, ch: int | None, bw: int | None, ssid: str | None) -> dict:
+def _radio_view(r: RadioInfo, mode: str, ch: int | None, bw: int | None, ssid: str | None,
+                security: str | None = None) -> dict:
     mesh = mode in MESH_MODES
+    if mode == "lan":
+        label = next((c["label"] for c in r.lan_channels if ch is not None
+                      and int(c["number"]) == int(ch)), str(ch) if ch is not None else None)
+        return {"mode": MODE_LABELS["lan"], "channel": label, "width": None,
+                "ssid": ssid, "security": ENCRYPTIONS.get(security or "", security)}
+    if mode == "wan":
+        return {"mode": MODE_LABELS["wan"], "channel": None, "width": None,
+                "ssid": "(network name not shown)"}
     return {"mode": MODE_LABELS.get(mode, mode),
             "channel": r.label(ch, bw) if mesh else None,
             "width": f"{bw} MHz" if mesh and bw else None,
@@ -702,10 +892,16 @@ def ledger_for(inv: NodeRadios, plan: NodePlan) -> list[dict[str, Any]]:
     rows = []
     for idx, (mode, ch, bw, ssid) in sorted(plan.final.items()):
         r = next(x for x in inv.radios if x.index == idx)
-        before = _radio_view(r, r.mode, r.channel, r.bandwidth, r.ssid)
-        after = _radio_view(r, mode, ch, bw, ssid)
+        sets = {k: v for i, k, v in plan.sets if i == idx}
+        before = _radio_view(r, r.mode, r.channel, r.bandwidth, r.ap_ssid if r.mode == "lan"
+                             else r.ssid, r.encryption)
+        after = _radio_view(r, mode, ch, bw, ssid, sets.get("encryption") or r.encryption)
+        if "key" in sets:
+            after["password"] = "changed (not shown)" if sets["key"] else "none"
+        if mode == "wan" and "ssid" in sets:
+            after["ssid"] = "new network (name not shown)"
         rows.append({"band": r.band, "band_label": band_label(r.band), "before": before,
-                     "after": after, "changed": before != after})
+                     "after": after, "changed": before != after or "key" in sets})
     return rows
 
 
@@ -715,6 +911,9 @@ def describe(inv: NodeRadios) -> str:
         if r.mode in MESH_MODES:
             parts.append(f"{band_label(r.band)} {MODE_LABELS[r.mode]} ch "
                          f"{r.label(r.channel, r.bandwidth)} @ {r.bandwidth} MHz")
+        elif r.mode == "lan":
+            parts.append(f"{band_label(r.band)} LAN Hotspot ch {r.channel}"
+                         + (f" ({r.ap_ssid})" if r.ap_ssid else ""))
         else:
             parts.append(f"{band_label(r.band)} {MODE_LABELS.get(r.mode, r.mode)}")
     return "; ".join(parts)
@@ -784,7 +983,7 @@ async def run_radio_change(cluster: list[str],
         plans[n] = plan
         r.ledger = ledger_for(inv, plan)
         r.status = "would-change"
-        r.detail = ", ".join(f"radio{i}_{k}={v}" for i, k, v in plan.sets)
+        r.detail = ", ".join(f"radio{i}_{k}={v}" for i, k, v in safe_sets(plan))
         if plan.notes:
             r.detail += " (" + "; ".join(plan.notes) + ")"
 
@@ -816,20 +1015,25 @@ async def run_radio_change(cluster: list[str],
     # ---- arm every node with the same apply time
     apply_at = int(now() + cfg.lead_seconds)
     log("-", "radio-arm", apply_at=apply_at, nodes=targets,
-        changes={n: [asdict(c) for c in per_node[n]] for n in targets},
-        settings={n: plans[n].sets for n in targets})
+        changes={n: [c.redacted() for c in per_node[n]] for n in targets},
+        settings={n: safe_sets(plans[n]) for n in targets})
     armed: list[str] = []
     for n in targets:
         script = build_apply_script(plans[n].sets, apply_at, cfg.revert_after)
         try:
             s = await connect(n)
+            tmp = None
             try:
+                # The script can hold a hex-encoded Wi-Fi password: delete the local copy
+                # whatever happens.
                 with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+                    tmp = Path(f.name)
                     f.write(script)
-                await s.upload(Path(f.name), REMOTE_SCRIPT)
-                Path(f.name).unlink(missing_ok=True)
+                await s.upload(tmp, REMOTE_SCRIPT)
                 await s.run(detached(f"sh {REMOTE_SCRIPT}"), timeout=20)
             finally:
+                if tmp:
+                    tmp.unlink(missing_ok=True)
                 await s.close()
             armed.append(n)
             results[n].status = "armed"

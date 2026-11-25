@@ -269,7 +269,7 @@ function bandHtml(b, ctx = { kind: "group" }) {
   const blank = ctx.kind === "node" ? `Keep current (${esc(MODE_NAMES[curMode] || curMode || "?")})`
     : curMode ? `Leave as is (${esc(MODE_NAMES[curMode] || curMode)})` : "Leave as is (mixed)";
   // Only purposes every selected radio's hardware supports (as the nodes report it).
-  const modeOpts = ["mesh", "meshap", "meshsta", "meshptp", "off"]
+  const modeOpts = ["mesh", "meshap", "meshsta", "meshptp", "lan", "wan", "off"]
     .filter((m) => m === "off" || !b.supported_modes || b.supported_modes.includes(m))
     .map((m) => `<option value="${m}">${MODE_NAMES[m]}</option>`).join("");
   const without = ctx.kind === "group" && b.without.length ? `<p class="hint">No ${esc(b.band_label)} radio on: ${esc(b.without.join(", "))}. They're left alone.</p>` : "";
@@ -287,6 +287,14 @@ function bandHtml(b, ctx = { kind: "group" }) {
         <span class="ssid-row"><input data-k="ssid" maxlength="20" placeholder="${esc(ctx.kind === "node" ? `Keep current (${curSsid || "AREDN"})` : curSsid ? `Leave as is (${curSsid})` : "Leave as is")}"><span class="suffix"></span></span></label>
       <label class="wide peer hidden">Peer MAC (Mesh PtP) <input data-k="peer" placeholder="aa:bb:cc:dd:ee:ff"></label>
     </div>
+    <div class="grid2 ap hidden">
+      <label class="wide"><span class="ap-name-label">Network name</span> <input data-k="ap_ssid" maxlength="32" autocomplete="off"></label>
+      <label class="lan-only">Security <select data-k="encryption">
+        <option value="">Keep current</option><option value="psk2">WPA2 PSK</option><option value="psk">WPA PSK</option><option value="none">None (open)</option></select></label>
+      <label class="pw"><span class="pw-label">Password</span> <span class="pw-row"><input data-k="key" type="password" maxlength="32" autocomplete="new-password"><button type="button" class="ghost eye" title="Show the password">Show</button></span></label>
+      <label class="wide wan-only check"><input type="checkbox" data-k="open"> The network has no password (open)</label>
+      <p class="hint wide ap-note"></p>
+    </div>
     <p class="hint band-hint"></p>${without}${ownNote}</div>`;
 }
 
@@ -298,6 +306,15 @@ function mountBands(container, bands, ctx, values = {}) {
     if (v.mode) $('[data-k="mode"]', el).value = v.mode;
     if (v.ssid) $('[data-k="ssid"]', el).value = v.ssid;
     if (v.peer) $('[data-k="peer"]', el).value = v.peer;
+    if (v.ap_ssid) $('[data-k="ap_ssid"]', el).value = v.ap_ssid;
+    if (v.encryption) $('[data-k="encryption"]', el).value = v.encryption;
+    if (v.open) $('[data-k="open"]', el).checked = true;
+    el._keySaved = !!v.key_saved;
+    $(".eye", el).addEventListener("click", () => {
+      const k = $('[data-k="key"]', el);
+      k.type = k.type === "password" ? "text" : "password";
+      $(".eye", el).textContent = k.type === "password" ? "Show" : "Hide";
+    });
     el._initial = v;
     $$("select, input", el).forEach((s) => s.addEventListener(s.tagName === "INPUT" ? "input" : "change", () => refreshBand(el)));
     refreshBand(el);
@@ -322,20 +339,54 @@ function refreshBand(el) {
   wSel.disabled = !meshy;
 
   // Channel: exactly the node dialog's list for this mode and width, common to all nodes here.
+  // A LAN Hotspot uses the dialog's hotspot list (20 MHz); a WAN Client follows its AP.
   const width = wSel.value || (curW ? String(curW) : "");
   const table = b.channels[mode && mode !== "mesh" ? "managed" : "mesh"] || {};
-  const opts = width ? (table[width] || []) : [];
+  const hot = mode === "lan";
+  const opts = hot ? (b.channels.hotspot || []) : width ? (table[width] || []) : [];
   const cPrev = cSel.value || (el._initial?.channel != null ? String(el._initial.channel) : "");
   el._initial = { ...el._initial, width: undefined, channel: undefined };
-  const cur = b.current;
+  const cur = hot ? b.current_hotspot : b.current;
   const curOk = cur && opts.some((c) => c.number === cur.channel);
   const keepLabel = cur ? (opts.find((c) => c.number === cur.channel)?.label || cur.channel) : null;
-  const sameWidth = !wSel.value || +wSel.value === cur?.width;
+  const sameWidth = hot || !wSel.value || +wSel.value === cur?.width;
   const cBlank = nodeCtx ? (curOk ? `Keep current (${esc(keepLabel)})` : "— choose —")
     : curOk ? `${sameWidth ? "Leave as is" : "Keep"} (${esc(keepLabel)})` : "— choose —";
   cSel.innerHTML = `<option value="">${cBlank}</option>` + opts.map((c) => `<option value="${c.number}">${esc(c.label)}</option>`).join("");
   if ([...cSel.options].some((o) => o.value === cPrev)) cSel.value = cPrev;
-  cSel.disabled = !meshy || !width;
+  cSel.disabled = hot ? false : (!meshy || !width);
+
+  // LAN Hotspot / WAN Client: network name, security (hotspot), password.
+  const ap = mode === "lan" || mode === "wan";
+  $(".ap", el).classList.toggle("hidden", !ap);
+  wSel.closest("label").classList.toggle("hidden", ap);
+  $('[data-k="ssid"]', el).closest("label").classList.toggle("hidden", ap);
+  cSel.closest("label").classList.toggle("hidden", mode === "wan");
+  if (ap) {
+    const entering = $('[data-k="mode"]', el).value === mode && b.current_mode !== mode;
+    const encSel = $('[data-k="encryption"]', el);
+    if (mode === "lan" && entering && !encSel.value) encSel.value = "psk2";
+    $(".lan-only", el).classList.toggle("hidden", mode !== "lan");
+    $(".wan-only", el).classList.toggle("hidden", mode !== "wan");
+    $(".ap-name-label", el).textContent = mode === "lan" ? "Hotspot network name" : "Network to join";
+    const nameIn = $('[data-k="ap_ssid"]', el);
+    const curName = mode === "lan" ? b.current_hotspot?.ap_ssid : null;
+    nameIn.placeholder = curName ? (nodeCtx ? `Keep current (${curName})` : `Leave as is (${curName})`)
+      : mode === "wan" && !entering ? "Leave as is (not shown)" : "Required";
+    const enc = encSel.value || (mode === "lan" ? b.current_hotspot?.encryption : null);
+    const open = mode === "wan" && $('[data-k="open"]', el).checked;
+    const keyIn = $('[data-k="key"]', el);
+    const noPw = (mode === "lan" && enc === "none") || open;
+    keyIn.disabled = noPw;
+    $(".pw", el).classList.toggle("hidden", noPw);
+    keyIn.placeholder = el._keySaved ? "Keep the saved password"
+      : !entering && !(mode === "lan" && encSel.value && encSel.value !== b.current_hotspot?.encryption)
+        ? "Leave as is (not shown)" : "8-32 characters";
+    $(".ap-note", el).textContent = mode === "lan"
+      ? "The hotspot runs at 20 MHz on the channel above. Passwords are sent to the node only; Fleet Manager doesn't keep group passwords"
+        + (nodeCtx ? ", and keeps a node's own in Windows' credential store." : ".")
+      : "Fleet Manager checks that the radio joins this network; if it doesn't, the change is reverted. The network name and password aren't shown in logs.";
+  }
 
   // SSID preview: what the node will actually broadcast.
   const ssidIn = $('[data-k="ssid"]', el);
@@ -346,8 +397,11 @@ function refreshBand(el) {
   $(".suffix", el).textContent = meshy && bw ? `→ ${ssidFull(base, mode, ch ?? "?", bw, b.band)}` : "";
   const badSsid = ssidIn.value && !/^[A-Za-z0-9_.-]{1,20}$/.test(ssidIn.value.trim());
 
+  const badKey = ap && $('[data-k="key"]', el).value && !/^[ -~]{8,32}$/.test($('[data-k="key"]', el).value);
   hint.textContent = badSsid ? "SSID: up to 20 letters, digits, - _ or . (the node adds the rest)."
-    : !meshy && mode !== "off" && mode ? `${MODE_NAMES[mode] || "This"} radios aren't changed here; choose a mesh purpose to use this radio for the mesh.`
+    : badKey ? "Wi-Fi password: 8-32 printable characters."
+    : hot && !opts.length ? "No hotspot channel is offered on every node here."
+    : ap ? ""
     : meshy && !width ? "These nodes use different widths; choose a width to see channels."
     : meshy && !opts.length ? "No channel is available at this width on every node here."
     : "";
@@ -362,8 +416,26 @@ function bandValues(el) {
     channel: num($('[data-k="channel"]', el).value),
     ssid: $('[data-k="ssid"]', el).value.trim() || null,
     peer: $('[data-k="peer"]', el).value.trim() || null,
+    ...apValues(el),
   };
 }
+
+// Hotspot / client fields: only sent when the radio will be a LAN Hotspot or WAN Client.
+// key: null = keep the current (or saved) password, "" = none (open network).
+function apValues(el) {
+  const mode = $('[data-k="mode"]', el).value || el._band.current_mode;
+  if (mode !== "lan" && mode !== "wan") return { ap_ssid: null, encryption: null, key: null };
+  const enc = mode === "lan" ? ($('[data-k="encryption"]', el).value || null) : null;
+  const open = mode === "wan" && $('[data-k="open"]', el).checked;
+  const pw = $('[data-k="key"]', el).value;
+  return {
+    ap_ssid: $('[data-k="ap_ssid"]', el).value.trim() || null,
+    encryption: enc,
+    key: open ? "" : (mode === "lan" && enc === "none") ? null : (pw || null),
+  };
+}
+
+const hasApChange = (v) => v.ap_ssid !== null || v.encryption !== null || v.key !== null;
 
 // ------------------------------------------------------------------ node-specific settings
 async function openNodeEditor(node) {
@@ -387,7 +459,7 @@ async function openNodeEditor(node) {
     const radio = {};
     $$("#ne-bands .band").forEach((el) => {
       const v = bandValues(el);
-      if (v.mode || v.width !== null || v.channel !== null || v.ssid || v.peer) radio[v.band] = v;
+      if (v.mode || v.width !== null || v.channel !== null || v.ssid || v.peer || hasApChange(v)) radio[v.band] = v;
     });
     await api(`/api/overrides/${encodeURIComponent(node)}`, { method: "PUT", body: { radio, note: $("#ne-note").value.trim() } });
     d.close();
@@ -403,12 +475,21 @@ function radioChanges() {
     const b = el._band;
     const v = bandValues(el);
     const effMode = v.mode || b.current_mode;
-    if (!v.mode && v.width === null && v.channel === null && !v.ssid) continue;
+    if (!v.mode && v.width === null && v.channel === null && !v.ssid && !hasApChange(v)) continue;
     const tableKey = effMode && effMode !== "mesh" ? "managed" : "mesh";
     const w = v.width ?? b.current?.width;
     const keepOk = b.current && (b.channels[tableKey][String(w)] || []).some((c) => c.number === b.current.channel);
     if (MESH.includes(effMode) && v.channel === null && !keepOk && (v.mode || v.width !== null)) {
       throw new Error(`Radio ${b.band_label}: choose a channel for the new settings`);
+    }
+    if (effMode === "lan" && v.mode === "lan" && b.current_mode !== "lan") {
+      if (v.channel === null) throw new Error(`Radio ${b.band_label}: choose a channel for the hotspot`);
+      if (!v.ap_ssid) throw new Error(`Radio ${b.band_label}: give the hotspot a network name`);
+      if (v.encryption !== "none" && !v.key) throw new Error(`Radio ${b.band_label}: a protected hotspot needs a password (8-32 characters)`);
+    }
+    if (effMode === "wan" && v.mode === "wan" && b.current_mode !== "wan") {
+      if (!v.ap_ssid) throw new Error(`Radio ${b.band_label}: give the network to join`);
+      if (v.key === null) throw new Error(`Radio ${b.band_label}: give the network's password, or tick "no password"`);
     }
     out.push(v);
   }
@@ -611,6 +692,9 @@ function cell(before, after) {
   return `<td class="chg">${esc(before ?? "–")}<span class="arrow">→</span><b>${esc(after ?? "–")}</b></td>`;
 }
 
+// SSID column: mesh SSID, or a hotspot's network name and security (passwords never shown).
+const netCell = (v) => [v.ssid, v.security, v.password && `password ${v.password}`].filter(Boolean).join(" · ") || null;
+
 function radioLedger(r) {
   let changing = 0;
   const body = r.clusters.map((c) => {
@@ -625,7 +709,7 @@ function radioLedger(r) {
       changing += 1;
       return n.ledger.map((l, i) => `<tr>
         <td>${i === 0 ? `<b>${esc(n.node)}</b>${own}` : ""}</td><td>${esc(l.band_label)}</td>
-        ${cell(l.before.mode, l.after.mode)}${cell(l.before.channel, l.after.channel)}${cell(l.before.width, l.after.width)}${cell(l.before.ssid, l.after.ssid)}
+        ${cell(l.before.mode, l.after.mode)}${cell(l.before.channel, l.after.channel)}${cell(l.before.width, l.after.width)}${cell(netCell(l.before), netCell(l.after))}
         <td>${i === 0 ? '<span class="st-go">will change</span>' : ""}</td>
         <td class="lost">${i === 0 && n.lost_links.length ? "will lose RF link to " + esc(n.lost_links.join(", ")) + " (intended)" : ""}</td></tr>`).join("");
     }).join("");
@@ -633,7 +717,7 @@ function radioLedger(r) {
   }).join("");
   const warns = (r.warnings || []).map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("");
   return `<p class="summary-line"><b>${changing}</b> node(s) will change. Nodes reboot if AREDN needs it, and each puts its old settings back unless every node in its cluster is seen on the new settings with the RF links it should have.</p>
-    <table class="ledger"><thead><tr><th>Node</th><th>Radio</th><th>Purpose</th><th>Channel</th><th>Width</th><th>SSID</th><th>Status</th><th></th></tr></thead><tbody>${body}</tbody></table>${warns}
+    <table class="ledger"><thead><tr><th>Node</th><th>Radio</th><th>Purpose</th><th>Channel</th><th>Width</th><th>SSID / network</th><th>Status</th><th></th></tr></thead><tbody>${body}</tbody></table>${warns}
     ${r.blocked.length ? `<p class="st-blocked">Blocked: ${esc(r.blocked.join(", "))}. Fix these (or deselect them) and review again.</p>` : ""}`;
 }
 

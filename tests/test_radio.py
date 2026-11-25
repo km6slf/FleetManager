@@ -111,8 +111,15 @@ def test_missing_band_is_skipped_not_failed():
 
 
 def test_change_validation():
+    BandChange("5GHz", mode="lan").validate()   # what a hotspot still needs is checked per node
     with pytest.raises(ValueError):
-        BandChange("5GHz", mode="lan").validate()
+        BandChange("5GHz", mode="lan", width=20).validate()
+    with pytest.raises(ValueError):
+        BandChange("5GHz", mode="wan", channel=36).validate()
+    with pytest.raises(ValueError):
+        BandChange("5GHz", mode="lan", key="short").validate()
+    with pytest.raises(ValueError):
+        BandChange("5GHz", mode="lan", ap_ssid="bad/name").validate()
     with pytest.raises(ValueError):
         BandChange("5GHz", mode="meshptp").validate()
     with pytest.raises(ValueError):

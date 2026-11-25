@@ -161,6 +161,7 @@ class AppState:
         self.settings: dict[str, Any] = {}
         self.load_topology()
         self.overrides: dict[str, dict[str, Any]] = self._load_overrides()
+        self.wifi_keys: dict[str, str] | None = None   # set to a dict to keep them in memory
 
     # ---------------------------------------------------------------- node-specific settings
     def _load_overrides(self) -> dict[str, dict[str, Any]]:
@@ -169,7 +170,76 @@ class AppState:
         except (OSError, ValueError):
             return {}
 
+    # Wi-Fi passwords of a node's own LAN Hotspot / WAN Client settings never go in
+    # overrides.json: they're kept in the OS credential store under "aredn-fleet-wifi",
+    # and overrides.json only says whether one is saved ("key_saved") or there is none ("open").
+    WIFI_KEYRING = "aredn-fleet-wifi"
+
+    def wifi_key_set(self, node: str, band: str, key: str | None) -> None:
+        name = f"{node}|{band}"
+        if self.wifi_keys is not None:          # tests / no credential store
+            if key:
+                self.wifi_keys[name] = key
+            else:
+                self.wifi_keys.pop(name, None)
+            return
+        if key:
+            import keyring
+            keyring.set_password(self.WIFI_KEYRING, name, key)
+            return
+        try:                                     # forgetting: nothing saved is fine too
+            import keyring
+            keyring.delete_password(self.WIFI_KEYRING, name)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def wifi_key_get(self, node: str, band: str) -> str | None:
+        name = f"{node}|{band}"
+        if self.wifi_keys is not None:
+            return self.wifi_keys.get(name)
+        try:
+            import keyring
+            return keyring.get_password(self.WIFI_KEYRING, name)
+        except Exception:  # noqa: BLE001 - no credential store: treated as not saved
+            return None
+
+    def own_radio(self, node: str) -> dict[str, dict[str, Any]] | None:
+        """A node's own radio settings, with saved Wi-Fi passwords filled back in."""
+        radio = (self.overrides.get(node) or {}).get("radio")
+        if not radio:
+            return None
+        out = {}
+        for band, vals in radio.items():
+            v = {k: x for k, x in vals.items() if k not in ("key_saved", "open")}
+            if vals.get("open"):
+                v["key"] = ""
+            elif vals.get("key_saved"):
+                key = self.wifi_key_get(node, band)
+                if key is None:
+                    raise ValueError(f"{node}: the Wi-Fi password saved for its {band} settings "
+                                     "is missing from this PC's credential store; edit its own "
+                                     "settings and enter it again")
+                v["key"] = key
+            out[band] = v
+        return out
+
     def set_override(self, node: str, radio: dict[str, dict[str, Any]], note: str = "") -> None:
+        radio = {b: dict(v) for b, v in radio.items()}
+        old = (self.overrides.get(node) or {}).get("radio") or {}
+        for band, vals in radio.items():
+            key = vals.pop("key", None)
+            if key is None:                      # not given: keep whatever was saved
+                for flag in ("key_saved", "open"):
+                    if (old.get(band) or {}).get(flag) and vals.get("mode") in ("lan", "wan"):
+                        vals[flag] = True
+            elif key == "":
+                self.wifi_key_set(node, band, None)
+                vals["open"] = True
+            else:
+                self.wifi_key_set(node, band, key)
+                vals["key_saved"] = True
+        for band in set(old) - set(radio):       # a band's own settings removed: forget its key
+            self.wifi_key_set(node, band, None)
         clean = {b: {k: v for k, v in vals.items() if v not in (None, "")}
                  for b, vals in radio.items()}
         clean = {b: v for b, v in clean.items() if v}
@@ -180,6 +250,8 @@ class AppState:
         self._save_overrides()
 
     def delete_override(self, node: str) -> None:
+        for band in ((self.overrides.get(node) or {}).get("radio") or {}):
+            self.wifi_key_set(node, band, None)
         self.overrides.pop(node, None)
         self._save_overrides()
 
@@ -374,6 +446,9 @@ def radio_options(radios: dict[str, dict[str, Any]], nodes: list[str],
                 per_bw[str(bw)] = [c for c in rs[0].channel_options(mode, bw)
                                    if int(c["number"]) in (common or set())]
             options[cls] = per_bw
+        # Hotspot channels every selected radio here offers (the node dialog's hotspot list).
+        common = set.intersection(*({int(c["number"]) for c in r.lan_channels} for r in rs))
+        options["hotspot"] = [c for c in rs[0].lan_channels if int(c["number"]) in common]
         modes = {r.mode for r in rs}
         # Purposes every selected radio on this band supports (None where a node didn't say).
         sup = [set(r.modes) for r in rs if r.modes is not None]
@@ -382,13 +457,19 @@ def radio_options(radios: dict[str, dict[str, Any]], nodes: list[str],
         out.append({
             "band": band, "band_label": band_label(band), "nodes": sorted(b["nodes"]),
             "per_node": {n: next(({"mode": r.mode, "channel": r.channel, "bandwidth": r.bandwidth,
-                                   "label": r.label(r.channel, r.bandwidth), "ssid": r.ssid}
+                                   "label": r.label(r.channel, r.bandwidth), "ssid": r.ssid,
+                                   "ap_ssid": r.ap_ssid, "encryption": r.encryption}
                                   for r in known[n].radios if r.band == band), None)
                          for n in sorted(b["nodes"])},
             "without": sorted(set(known) - set(b["nodes"])),
             "modes": sorted(modes), "supported_modes": supported, "bws": bws, "channels": options,
             "current": ({"channel": next(iter(chans))[0], "width": next(iter(chans))[1]}
                         if len(chans) == 1 else None),
+            "current_hotspot": ({"channel": next(iter(hs))[0], "ap_ssid": next(iter(hs))[1],
+                                 "encryption": next(iter(hs))[2]}
+                                if len(hs := {(r.channel, r.ap_ssid, r.encryption)
+                                              for r in rs if r.mode == "lan"}) == 1
+                                and all(r.mode == "lan" for r in rs) else None),
             "current_mode": next(iter(modes)) if len(modes) == 1 else None,
             "current_ssid": (next(iter(ss)) if len(ss := {r.ssid for r in rs if r.mode in MESH_MODES})
                              == 1 else None),
@@ -414,6 +495,12 @@ def custom_summary(ov: dict[str, Any] | None) -> dict[str, Any] | None:
             bits.append(f"{v['width']} MHz")
         if v.get("ssid"):
             bits.append(f"SSID {v['ssid']}")
+        if v.get("ap_ssid"):
+            bits.append(f"network {v['ap_ssid']}" if v.get("mode") == "lan" else "network set")
+        if v.get("encryption"):
+            bits.append({"psk2": "WPA2", "psk": "WPA", "none": "open"}.get(v["encryption"], v["encryption"]))
+        if v.get("key_saved"):
+            bits.append("password saved")
         if v.get("peer"):
             bits.append(f"peer {v['peer']}")
         parts.append(f"{band_label(band)}: {', '.join(bits)}")

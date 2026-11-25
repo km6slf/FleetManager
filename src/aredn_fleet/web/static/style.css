@@ -170,3 +170,7 @@ dialog.wide { width: min(980px, 94vw); }
 .in-step .row { align-items: center; gap: 8px; } .in-step .row input.in-probe-ip { width: 140px; flex: none; }
 #netwarn { width: min(640px, 94vw); }
 #nw-cmd { background: var(--bg, #0e1116); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; white-space: pre-wrap; user-select: all; margin: 0; }
+.band .ap { margin-top: 6px; }
+.band .pw-row { display: flex; gap: 6px; }
+.band .pw-row input { flex: 1; }
+.band .check { flex-direction: row; align-items: center; gap: 8px; }

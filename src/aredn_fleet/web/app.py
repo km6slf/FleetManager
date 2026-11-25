@@ -88,6 +88,9 @@ class BandChangeReq(BaseModel):
     width: int | None = None
     peer: str | None = None
     ssid: str | None = None
+    ap_ssid: str | None = None      # LAN Hotspot / WAN Client network name
+    encryption: str | None = None   # hotspot security: psk2 / psk / none
+    key: str | None = None          # Wi-Fi password; "" = none (open network); never logged
 
 
 class RadioReq(BaseModel):
@@ -495,9 +498,12 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             raise HTTPException(400, "type 'switch' to confirm")
         from ..jobs.radio import merge_changes
 
-        group = [BandChange(c.band, c.mode, c.channel, c.width, c.peer, c.ssid) for c in req.changes]
-        per_node = {n: merge_changes(group, (state.overrides.get(n) or {}).get("radio"))
-                    for n in req.nodes}
+        group = [BandChange(c.band, c.mode, c.channel, c.width, c.peer, c.ssid,
+                            c.ap_ssid or None, c.encryption or None, c.key) for c in req.changes]
+        try:
+            per_node = {n: merge_changes(group, state.own_radio(n)) for n in req.nodes}
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         if not any(per_node.values()):
             raise HTTPException(400, "nothing to change: choose a setting, or give nodes their own settings")
         try:
@@ -509,6 +515,8 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
         selected = set(req.nodes)
         clusters = [sorted(c & selected) for c in rf_clusters(state.topology, selected)]
         fp = fingerprint({"nodes": sorted(req.nodes), "changes": [c.model_dump() for c in req.changes],
+                          "own_keys": {n: [f"{b}:{bool(k.get('key'))}" for b, k in
+                                           (state.own_radio(n) or {}).items()] for n in sorted(req.nodes)},
                           "own": {n: (state.overrides.get(n) or {}).get("radio") for n in sorted(req.nodes)},
                           "revert_after": req.revert_after})
         if req.execute and (why := state.jobs.reviewed(req.reviewed_job, "radio", fp)):
@@ -850,16 +858,22 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
         changes = []
         for band, v in req.radio.items():
             d = v.model_dump() if hasattr(v, "model_dump") else dict(v)
-            d = {k: d.get(k) for k in ("mode", "channel", "width", "ssid", "peer")}
-            if all(x in (None, "") for x in d.values()):
+            key = d.get("key")
+            d = {k: d.get(k) for k in ("mode", "channel", "width", "ssid", "peer",
+                                       "ap_ssid", "encryption")}
+            if all(x in (None, "") for x in d.values()) and key is None:
                 continue
+            # A password left blank on an existing hotspot / client keeps the saved one.
+            saved = (state.own_radio(node) or {}).get(band, {}).get("key") \
+                if key is None and d.get("mode") in ("lan", "wan") else None
             c = BandChange(band, d["mode"] or None, d["channel"], d["width"], d["peer"] or None,
-                           d["ssid"] or None)
+                           d["ssid"] or None, d["ap_ssid"] or None, d["encryption"] or None,
+                           key if key is not None else saved)
             try:
                 c.validate()
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
-            radio[band] = d
+            radio[band] = {**d, **({"key": key} if key is not None else {})}
             changes.append(c)
         if changes:
             inv = state.radios.get(node)
