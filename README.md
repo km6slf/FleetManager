@@ -11,6 +11,7 @@ Safe, bulk management of AREDN® mesh nodes from one PC: discover the mesh, tick
 - [Goals](#goals)
 - [How it works on the nodes](#how-it-works-on-the-nodes)
 - [Install](#install)
+- [Docker](#docker)
 - [Getting started](#getting-started)
 - [Firmware upgrades](#firmware-upgrades)
 - [Radio settings](#radio-settings)
@@ -60,12 +61,77 @@ Download from [Releases](https://github.com/km6slf/FleetManager/releases): a num
 
 Both use the Microsoft Edge WebView2 runtime, which Windows 10 and 11 already have.
 
-### Linux
+### Docker (Linux, Raspberry Pi, Windows)
+Fleet Manager also runs as a container with a web UI you open in any browser. That's handy on a small always-on machine on the mesh, and upgrades become one command. Images are published at `ghcr.io/km6slf/fleetmanager` for Linux (amd64 and arm64, so Raspberry Pi 4/5 work) and Windows containers. Docker picks the right one automatically. See [Docker](#docker) below for setup.
+
+### Linux without Docker
 A `.deb` is planned. Until then, run it headless and use any browser:
 ```bash
 pip install "aredn-fleet[serve] @ https://github.com/km6slf/FleetManager/archive/refs/heads/main.zip"
 aredn-fleet serve --host 0.0.0.0     # prints a link with an access token
 ```
+
+## Docker
+### What you need
+- **Docker** on Linux, or **Docker Desktop** on Windows or Mac. Docker Desktop's default mode (Linux containers) is what most people want, including on Windows. The Windows-container image is for Docker set to "Windows containers" or Docker on Windows Server.
+- **A machine cabled to a mesh node** (its LAN port), as with the desktop app. The container reaches the mesh through that machine's network.
+- **The address of that node:** the machine's default gateway on that network, for example `10.99.154.177`. On Linux run `ip route` and look for `default via …` on that interface; on Windows run `ipconfig` and look for **Default Gateway** under the adapter cabled to the node.
+
+### Install with Docker Compose (recommended)
+1. Download [`docker-compose.yml`](docker-compose.yml) and [`packaging/docker/example.env`](packaging/docker/example.env) into a folder, and rename `example.env` to `.env`.
+2. Edit `.env`:
+   - `FLEET_SECRETS_PASSWORD`: a long password of your choice. It unlocks the encrypted file in which Fleet Manager keeps saved node and Wi-Fi passwords. **Keep it**: it's needed on every start, and changing it makes saved passwords unreadable.
+   - `AREDN_FLEET_DNS`: the node's address from above. Docker's own name lookup doesn't know mesh names, so Fleet Manager asks this node for `localnode` and `*.local.mesh`.
+   - `FLEET_TAG` (optional): `latest` (newest numbered release), `dev` (newest build, least tested) or a version such as `0.1.0-alpha.1`.
+3. Start it:
+   ```bash
+   docker compose up -d
+   docker compose logs fleet        # shows the link to open, with its access token
+   ```
+4. Open the link in a browser. It sets a cookie, so later visits to `http://localhost:8787/` work without the token. The link stays the same across restarts and upgrades.
+
+By default the web UI only answers on the machine running Docker. To use it from other computers, change `"127.0.0.1:8787:8787"` to `"8787:8787"` in `docker-compose.yml`, and set `FLEET_PUBLIC_HOST` to the machine's name so the printed link points to it. Anyone with the link can manage your nodes, and the connection is plain HTTP like the rest of the mesh; for access beyond your own network, put it behind a reverse proxy with HTTPS.
+
+### Upgrade
+```bash
+docker compose pull
+docker compose up -d
+```
+Everything Fleet Manager keeps (settings, saved passwords, pinned SSH host keys, configuration backups, downloaded firmware, job logs) is in the `fleet-data` volume, so upgrades keep it. To go back to an earlier version, set `FLEET_TAG` to it and run the same two commands.
+
+### Without Compose
+Linux:
+```bash
+docker run -d --name aredn-fleet --restart unless-stopped \
+  -p 127.0.0.1:8787:8787 -v fleet-data:/data \
+  -e FLEET_SECRETS_PASSWORD='your-long-password' -e AREDN_FLEET_DNS=10.99.154.177 \
+  ghcr.io/km6slf/fleetmanager:latest
+docker logs aredn-fleet
+```
+Windows (PowerShell, Docker Desktop in its default Linux-container mode):
+```powershell
+docker run -d --name aredn-fleet --restart unless-stopped `
+  -p 127.0.0.1:8787:8787 -v fleet-data:/data `
+  -e FLEET_SECRETS_PASSWORD='your-long-password' -e AREDN_FLEET_DNS=10.99.154.177 `
+  ghcr.io/km6slf/fleetmanager:latest
+docker logs aredn-fleet
+```
+Windows containers (Docker switched to "Windows containers"): the same, but with `-v fleet-data:C:\data` and `-p 8787:8787`, or `docker compose -f packaging/docker/docker-compose.windows.yml --env-file .env up -d`. The Windows image is built on Windows Server 2022 (`ltsc2022`); on Windows 10/11 it runs with Hyper-V isolation.
+
+### Settings
+| Variable | Needed | What it does |
+|---|---|---|
+| `FLEET_SECRETS_PASSWORD` | yes | Unlocks the encrypted file with saved node and Wi-Fi passwords (`/data/secrets/passwords.cfg`). Fleet Manager won't start without it, or with one that doesn't open the file. |
+| `AREDN_FLEET_DNS` | yes, in practice | Address of the mesh node to look up `localnode` and `*.local.mesh` on. |
+| `FLEET_TOKEN` | no | A fixed access token (16+ characters). By default one is made on first start and kept in the volume. |
+| `FLEET_PUBLIC_HOST` | no | Host name or address shown in the link in the logs. |
+| `FLEET_PORT` | no | Port inside the container (default 8787). |
+
+### Container notes
+- **Your machine's routes are used.** The container reaches the mesh (`10.0.0.0/8`) through the machine running Docker. If Docker on your machine is set to use `10.x` addresses for its own networks, change that, or the mesh won't be reachable.
+- **SSH keys:** to use an SSH key file, mount it read-only (for example `-v ~/.ssh/aredn:/keys/aredn:ro`) and add it on the Credentials tab as `/keys/aredn`.
+- **Not in the container:** the desktop window, the leftover-route check (it inspects Windows' own routes), and **Open folder** buttons. Files such as backups are in the volume (`docker cp aredn-fleet:/data/config/backups .` copies them out).
+- **Back up the volume** together with your `FLEET_SECRETS_PASSWORD`, for example `docker run --rm -v fleet-data:/data -v "$PWD":/backup alpine tar czf /backup/fleet-data.tgz -C /data .`
 
 ## Getting started
 1. **Connect your PC to a node** by Ethernet (its LAN port), so `localnode` is that node.
@@ -160,7 +226,8 @@ Covered: Ubiquiti 802.11n (TFTP), Ubiquiti 802.11ac (advanced), MikroTik (networ
 - **New device** prepares the files and steps, but no install has been done with it yet.
 
 **Limitations**
-- **Windows only** for the desktop app. Linux works headless from source; the `.deb` isn't built yet. There's no macOS build.
+- **Windows only** for the desktop app. Linux and Raspberry Pi run the [Docker image](#docker) or headless from source; the `.deb` isn't built yet. There's no macOS desktop build (Docker Desktop for Mac runs the Linux image).
+- **The Docker images are new:** they're built, started and health-checked automatically, but haven't yet managed a real mesh.
 - **Tiny-build hardware** (32 MB units such as the NanoStation M XM) ends at 3.25.5.1 and never speaks Babel, so it can't join a Babel-only mesh. That's an AREDN limitation; Fleet Manager labels these nodes OLSR and blocks upgrades they can't take.
 - **Discovery only sees nodes your PC can reach.** Babel-only and OLSR-only nodes can't see each other, so nodes on the other side of that boundary don't appear.
 - **Radio changes are refused** on a node with two radios on the same band, on 900 MHz (HaLow) hotspots, and on nodes older than 3.25.5 (their radios can be read, not changed).

@@ -9,7 +9,9 @@ token, so other programs and other machines can't drive it.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
+from pathlib import Path
 import socket
 import sys
 import threading
@@ -133,12 +135,66 @@ def _run_desktop() -> int:
     return 0
 
 
+def serve_token() -> str:
+    """The access token for headless mode: FLEET_TOKEN if set, else one kept in the config
+    folder (so the link survives restarts and container upgrades), created on first start."""
+    env = os.environ.get("FLEET_TOKEN", "").strip()
+    if env:
+        if len(env) < 16:
+            raise SystemExit("FLEET_TOKEN must be at least 16 characters")
+        return env
+    from .paths import config_dir
+    f = config_dir() / "serve-token"
+    try:
+        tok = f.read_text().strip()
+        if len(tok) >= 16:
+            return tok
+    except OSError:
+        pass
+    tok = secrets.token_urlsafe(24)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(tok)
+    try:
+        f.chmod(0o600)
+    except OSError:
+        pass
+    return tok
+
+
+def configure_secrets() -> None:
+    """Headless/container mode: with FLEET_SECRETS_FILE set, saved node and Wi-Fi passwords go to
+    that encrypted file (keyrings.cryptfile) instead of a desktop credential store, unlocked by
+    FLEET_SECRETS_PASSWORD. Refuses to start without it, or with one that doesn't open the file,
+    rather than waiting at a password prompt nobody can see."""
+    path = os.environ.get("FLEET_SECRETS_FILE", "").strip()
+    if not path:
+        return
+    pw = os.environ.pop("FLEET_SECRETS_PASSWORD", "")   # not passed on to child processes
+    if not pw.strip():
+        raise SystemExit("Set FLEET_SECRETS_PASSWORD: it unlocks the encrypted file where saved "
+                         "node and Wi-Fi passwords are kept. Use the same value every time.")
+    import keyring
+    from keyrings.cryptfile.cryptfile import CryptFileKeyring
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    kr = CryptFileKeyring()
+    kr.file_path = path
+    try:
+        kr.keyring_key = pw          # opens the file (checking the password) or creates it
+    except ValueError:
+        raise SystemExit("FLEET_SECRETS_PASSWORD doesn't open the saved-passwords file "
+                         f"({path}): use the password it was created with.") from None
+    keyring.set_keyring(kr)
+
+
 def serve(host: str = "127.0.0.1", port: int = 8787) -> int:
-    """Headless mode for a Linux box or Pi on the mesh; open the printed URL from any browser."""
-    token = secrets.token_urlsafe(24)
+    """Headless mode for a Linux box, Pi or container on the mesh; open the printed URL from
+    any browser."""
+    configure_secrets()
+    token = serve_token()
     server, thread = start_server(host, port, token)
     shown = host if host not in ("0.0.0.0", "::") else socket.gethostname()
-    print(f"AREDN Fleet Manager running. Open:\n  http://{shown}:{port}/?token={token}")
+    shown = os.environ.get("FLEET_PUBLIC_HOST") or shown
+    print(f"AREDN Fleet Manager running. Open:\n  http://{shown}:{port}/?token={token}", flush=True)
     if host not in ("127.0.0.1", "localhost", "::1"):
         print("Note: listening beyond this machine. Anyone with the link can manage your nodes; "
               "traffic is plain HTTP like the rest of the mesh.", file=sys.stderr)

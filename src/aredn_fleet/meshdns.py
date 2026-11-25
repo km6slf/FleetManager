@@ -41,9 +41,13 @@ def is_ip(host: str) -> bool:
 def mesh_name(host: str) -> str | None:
     """``node`` or ``node.local.mesh`` -> ``node.local.mesh``; other names and addresses -> None."""
     h = host.strip().rstrip(".").lower()
-    if not h or is_ip(h) or h in ("localnode", "localnode" + SUFFIX):
-        # "localnode" means whichever node this PC is cabled to now: always the system's answer
-        # (a remembered mesh server could be the node it was cabled to before).
+    if not h or is_ip(h):
+        return None
+    if h in ("localnode", "localnode" + SUFFIX) and not os.environ.get("AREDN_FLEET_DNS"):
+        # "localnode" means whichever node this PC is cabled to now: the system's answer
+        # (a remembered mesh server could be the node it was cabled to before). With a mesh
+        # server set explicitly (e.g. in a container, whose DNS doesn't know mesh names),
+        # that node is the one meant, and it answers for "localnode" itself.
         return None
     if h.endswith(SUFFIX):
         return h

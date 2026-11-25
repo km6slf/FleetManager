@@ -588,6 +588,11 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
         for line in await asyncio.to_thread(link_lines, n):
             job.log(f"  {line}", "warn")
 
+    @app.get("/healthz")
+    async def healthz():
+        """For container health checks: says only that the server is up."""
+        return {"ok": True}
+
     @app.get("/api/netcheck")
     async def netcheck():
         from ..netcheck import check

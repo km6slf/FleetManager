@@ -1,0 +1,12 @@
+.git
+.github
+**/__pycache__
+*.pyc
+build
+dist
+portable
+tests
+docs
+packaging/windows
+*.egg-info
+.venv

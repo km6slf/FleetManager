@@ -1,0 +1,32 @@
+# AREDN Fleet Manager with Docker Compose. Quick start (see README.md, "Docker"):
+#   1. Copy packaging/docker/example.env to .env next to this file and fill it in.
+#   2. docker compose up -d
+#   3. docker compose logs fleet     (shows the link to open, with its access token)
+# Upgrade:  docker compose pull && docker compose up -d     (your data stays in the volume)
+services:
+  fleet:
+    image: ghcr.io/km6slf/fleetmanager:${FLEET_TAG:-latest}
+    container_name: aredn-fleet
+    restart: unless-stopped
+    ports:
+      # Who can open the web UI. Default: only this computer. To allow your LAN, use
+      # "8787:8787" (anyone with the link and token can manage your nodes).
+      - "127.0.0.1:8787:8787"
+    environment:
+      # Unlocks the encrypted file that holds saved node and Wi-Fi passwords. Required.
+      # Keep it the same across upgrades, or saved passwords can't be read.
+      FLEET_SECRETS_PASSWORD: ${FLEET_SECRETS_PASSWORD:?set FLEET_SECRETS_PASSWORD in .env}
+      # The mesh node this machine is cabled to (its LAN address, usually this machine's
+      # default gateway on that network). Mesh names (localnode, *.local.mesh) are looked up
+      # there, since Docker's own DNS doesn't know them.
+      AREDN_FLEET_DNS: ${AREDN_FLEET_DNS:?set AREDN_FLEET_DNS in .env}
+      # Optional: a fixed access token (16+ characters). Otherwise one is made on first start
+      # and kept in the data volume, so the link doesn't change.
+      FLEET_TOKEN: ${FLEET_TOKEN:-}
+      # Optional: the host name or address to show in the link printed in the logs.
+      FLEET_PUBLIC_HOST: ${FLEET_PUBLIC_HOST:-localhost}
+    volumes:
+      - fleet-data:/data
+
+volumes:
+  fleet-data:

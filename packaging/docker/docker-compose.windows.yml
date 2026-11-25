@@ -1,0 +1,20 @@
+# For Docker in "Windows containers" mode only (most Windows users should use the main
+# docker-compose.yml: Docker Desktop runs Linux containers by default).
+#   docker compose -f packaging/docker/docker-compose.windows.yml --env-file .env up -d
+services:
+  fleet:
+    image: ghcr.io/km6slf/fleetmanager:${FLEET_TAG:-latest}
+    container_name: aredn-fleet
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      FLEET_SECRETS_PASSWORD: ${FLEET_SECRETS_PASSWORD:?set FLEET_SECRETS_PASSWORD in .env}
+      AREDN_FLEET_DNS: ${AREDN_FLEET_DNS:?set AREDN_FLEET_DNS in .env}
+      FLEET_TOKEN: ${FLEET_TOKEN:-}
+      FLEET_PUBLIC_HOST: ${FLEET_PUBLIC_HOST:-localhost}
+    volumes:
+      - fleet-data:C:\data
+
+volumes:
+  fleet-data:

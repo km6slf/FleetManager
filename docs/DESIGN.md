@@ -246,6 +246,12 @@ A **New device** tab walks through putting AREDN on hardware for the first time 
   * Linux: XDG directories.
   * Portable: `data\` beside the exe.
   * The old `~/.config/aredn-fleet` from the CLI builds is migrated on first run.
+* **Docker** (`Dockerfile`, `Dockerfile.windows`, `docker-compose.yml`, `.github/workflows/docker.yml`): headless `serve` in a container, published as `ghcr.io/km6slf/fleetmanager` with one tag for linux/amd64, linux/arm64 and windows/amd64 (ltsc2022), combined with `buildx imagetools create`. Tags: `dev` (main), `<version>` and `latest` (release tags). Each image is started and checked in CI before publishing (refuses to start without its secrets password; `/healthz`; API needs the token; same link after a restart; a saved password isn't in plain text in the volume).
+  * All state in one volume (`AREDN_FLEET_HOME=/data`), so `docker compose pull && up -d` upgrades keep it.
+  * Access token: `FLEET_TOKEN`, or one made on first start and kept in `/data/config/serve-token`.
+  * Saved passwords: no desktop credential store in a container, so `FLEET_SECRETS_FILE` switches keyring to `keyrings.cryptfile`, unlocked by `FLEET_SECRETS_PASSWORD` (set from code: the library would otherwise prompt on a console). A missing or wrong password stops the start with a clear message instead of creating a second, unreadable file. Non-root user (uid 10001) in the Linux image.
+  * Mesh names: Docker's DNS doesn't know them, so `AREDN_FLEET_DNS` (the node the host is cabled to) answers them, `localnode` included when it's set explicitly.
+  * `/healthz` (no token, no data) for the container health check.
 * **Linux .deb:** planned. It will be a venv under `/opt` using the system `python3-gi`, with a desktop entry plus an optional systemd service. See `packaging/linux/README.md`. A test PyInstaller build on Linux hit GTK binding mismatches, which is why the .deb uses a venv instead.
 
 ## Safety principles

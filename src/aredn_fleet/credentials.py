@@ -51,7 +51,8 @@ class Credential:
         if self.key_path:
             return self.key_path
         if self.keyring:
-            return "OS credential store"
+            return ("encrypted file" if os.environ.get("FLEET_SECRETS_FILE")
+                    else "OS credential store")
         return f"${self.password_env}"
 
     def password(self) -> str:
