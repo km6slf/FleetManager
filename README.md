@@ -8,6 +8,7 @@ Safe, bulk management of AREDN® mesh nodes from one PC: discover the mesh, tick
 
 ## Contents
 - [Why](#why)
+- [Goals](#goals)
 - [How it works on the nodes](#how-it-works-on-the-nodes)
 - [Install](#install)
 - [Getting started](#getting-started)
@@ -19,12 +20,28 @@ Safe, bulk management of AREDN® mesh nodes from one PC: discover the mesh, tick
 - [Safety model](#safety-model)
 - [Troubleshooting](#troubleshooting)
 - [What's been tested where](#whats-been-tested-where)
+- [Known issues and limitations](#known-issues-and-limitations)
 - [Command line](#command-line)
 - [Development](#development)
 - [Feedback](#feedback)
 
 ## Why
 Upgrading or retuning a mesh one node at a time through each node's web page is slow, and the order matters: take down the wrong node first and you can't reach the ones behind it. Change one end of an RF link and it's stranded until the other end matches. Fleet Manager plans the order, makes RF neighbours change together, checks each step on the live mesh, and stops or reverts rather than pressing on.
+
+## Goals
+1. **Never strand a node.** Plan every change around the mesh's real shape: upgrade from the edge inward, switch RF neighbours together, verify on the live mesh, and stop or revert instead of pressing on.
+2. **Review before anything changes.** Every job runs as a read-only dry run first, and only the reviewed plan can run.
+3. **Follow the firmware, don't hard-code it.** Read settings, labels, channel lists and allowed purposes from each node, so new AREDN releases work without a Fleet Manager update.
+4. **Work across a mixed fleet:** many passwords and SSH keys, several firmware generations (3.23 to the nightly), OLSR and Babel, one or two radios per node, and per-node exceptions to group settings.
+5. **Nothing to install on the nodes,** and nothing secret written to files or logs.
+6. **Easy to pick up:** a Windows app (installer or portable) for club members, plus a headless mode and a command line.
+
+Planned next:
+- Automate the New device steps (built-in TFTP push and network-boot server, then the stage-2 upload).
+- A Linux `.deb` (desktop and headless service).
+- Multi-channel Mesh Stations (the nightly's `radioN_channels`).
+- An optional on-node helper package (`.ipk`) for the timed apply-and-revert.
+- A field test on a multi-node lab mesh before anyone uses it on a production mesh.
 
 ## How it works on the nodes
 Fleet Manager needs **nothing installed on the nodes**. It does what each node's own web pages do:
@@ -135,6 +152,30 @@ Covered: Ubiquiti 802.11n (TFTP), Ubiquiti 802.11ac (advanced), MikroTik (networ
 | Radio change job (clusters, revert, verify) | not yet | ✓ |
 | LAN Hotspot / WAN Client | not yet | ✓ |
 | New device wizard (file preparation and steps) | not yet | ✓ |
+
+## Known issues and limitations
+**Not yet proven on real hardware**
+- **Radio changes** (synchronized cluster switch, automatic revert, live checks) have only run against simulated nodes. The first real two-node test is next.
+- **LAN Hotspot and WAN Client** are new in this build and have only run against simulated nodes.
+- **New device** prepares the files and steps, but no install has been done with it yet.
+
+**Limitations**
+- **Windows only** for the desktop app. Linux works headless from source; the `.deb` isn't built yet. There's no macOS build.
+- **Tiny-build hardware** (32 MB units such as the NanoStation M XM) ends at 3.25.5.1 and never speaks Babel, so it can't join a Babel-only mesh. That's an AREDN limitation; Fleet Manager labels these nodes OLSR and blocks upgrades they can't take.
+- **Discovery only sees nodes your PC can reach.** Babel-only and OLSR-only nodes can't see each other, so nodes on the other side of that boundary don't appear.
+- **Radio changes are refused** on a node with two radios on the same band, on 900 MHz (HaLow) hotspots, and on nodes older than 3.25.5 (their radios can be read, not changed).
+- **Multi-channel Mesh Stations** (nightly) aren't supported yet: setting a channel clears a station's extra channels, as the node's own page does.
+- **If confirming a radio change fails partway through a cluster,** nodes already confirmed keep the new settings while the rest revert.
+- **Settings that do more than flip one switch** are listed but left to the node's own page, and *Enable SSH access* is never changed in bulk.
+- **Fleet Manager doesn't reboot nodes** after on/off settings that need it; it lists them for you.
+- **The leftover-route check** only runs on Windows.
+
+**Things that can look like bugs**
+- **The first Read settings** on a firmware version Fleet Manager hasn't seen copies that firmware's settings pages from the node, so it's slower over a weak link. Later reads are quick.
+- **Two nodes close together at full power** can overload each other's receivers (high "errors" on the link), causing timeouts. Lower the transmit power for bench tests.
+- **Older firmware upgrades take longer:** 3.23-era nodes reboot twice, and the job waits for both.
+
+Please report anything else on [GitHub Issues](https://github.com/km6slf/FleetManager/issues).
 
 ## Command line
 ```bash
