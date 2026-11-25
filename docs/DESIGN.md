@@ -70,7 +70,9 @@ These come from `aredn_fleet/rc.py`. They apply when the target is an RC nightly
 * **Radio details after an upgrade.** They're re-read when an upgrade succeeds, and stored with the firmware they were read on. Details read on other firmware are marked out of date and excluded from radio choices until read again.
 
 ### Older firmware and the OLSR → Babel move
-From AREDN's release notes: up to 3.25.4 nodes speak only OLSR; 3.25.5.0–3.25.10.0 speak OLSR and Babel side by side; 4.26.1.0 and later speak only Babel. Babel-only nodes don't know OLSR-only nodes exist. (`aredn_fleet/routing.py`)
+From AREDN's release notes: up to 3.25.4 nodes speak only OLSR; 3.25.5.0–3.25.10.0 speak OLSR and Babel side by side; 4.26.1.0 and later speak only Babel. Babel-only nodes don't know OLSR-only nodes exist. Exception: tiny builds (32 MB hardware such as the NanoStation M XM, last release 3.25.5.1) have no Babel on any release, so they stay OLSR-only and can never join a Babel-only mesh; Fleet Manager recognises them by their newest release being below 4.0 (from the release catalog) and labels them OLSR. (`aredn_fleet/routing.py`)
+
+Status reads try `/a/sysinfo` first, then `/cgi-bin/sysinfo.json`, then port 8080. 3.25.x answers `/a/sysinfo` with HTTP 200 and an HTML error page, so a reply that isn't JSON counts as "try the next path" (found on the bench NanoStation after its upgrade).
 * **Routing per node** comes from its firmware version, shown as an **OLSR** / **OLSR+Babel** badge in the Nodes table plus **Babel** (date-named nightlies before 2026-01-14 show "routing?"). During an upgrade the running daemons (`pidof olsrd`, `pidof babeld`) are checked too.
 * **Migration rule** for a Babel-only target, judged on the mesh as it will be after the run, repeated until stable because a blocked node stays where it is:
   * an OLSR-only node is blocked: it must go to an OLSR + Babel release first;

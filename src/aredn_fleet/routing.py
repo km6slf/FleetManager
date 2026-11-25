@@ -6,6 +6,10 @@ AREDN history (release notes):
 * 3.25.5.0 – 3.25.10.0: OLSR and Babel side by side ("dual");
 * 4.26.1.0 and later: Babel only.
 
+Exception: "tiny" builds (32 MB nodes such as the NanoStation M XM) never got Babel ("Tiny builds
+do not support Babel", 3.25.5.0 notes); their last release is 3.25.5.1, and they are OLSR-only
+on every release. Such a node's newest release is below 4.0, which is how they're recognised.
+
 Babel-only nodes don't know about OLSR-only nodes, so a node that stops speaking OLSR can
 strand OLSR-only nodes that reach the rest of the mesh through it, and an OLSR-only node can't
 jump straight to Babel-only without losing its neighbours. The safe order is: everything to a
@@ -38,16 +42,25 @@ ROUTING_CMD = ("pidof olsrd >/dev/null 2>&1 && echo olsrd; "
                "pidof babeld >/dev/null 2>&1 && echo babeld; true")
 
 
-def routing_of(version: str) -> str:
+def routing_of(version: str, babel_build: bool = True) -> str:
+    """``babel_build=False`` for hardware that only gets tiny builds (no Babel on any release)."""
     v = (version or "").strip()
     if m := STABLE_RE.match(v):
         t = tuple(int(x) for x in m.groups())
+        if not babel_build:
+            return OLSR
         return OLSR if t < FIRST_DUAL else DUAL if t < FIRST_BABEL_ONLY else BABEL
     if m := NIGHTLY_RE.match(v):
         if m.group(1) or m.group(2) >= BABEL_NIGHTLIES_FROM:
             return BABEL
         return UNKNOWN
     return UNKNOWN
+
+
+def tiny_build(final_release: str | None) -> bool:
+    """True when the hardware's newest release predates Babel-only firmware (tiny builds)."""
+    m = STABLE_RE.match(final_release or "")
+    return bool(m) and tuple(int(x) for x in m.groups()) < FIRST_BABEL_ONLY
 
 
 def routing_from_daemons(out: str) -> str | None:

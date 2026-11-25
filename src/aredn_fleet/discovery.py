@@ -56,8 +56,15 @@ def http_fetch(node: str, timeout: float = 8.0) -> dict[str, Any]:
     for path in SYSINFO_PATHS:
         try:
             with urllib.request.urlopen(f"http://{host}{path}", timeout=timeout) as resp:  # noqa: S310
-                return json.load(resp)
+                data = json.load(resp)
+            if isinstance(data, dict):
+                return data
+            last = ValueError(f"{path}: not a sysinfo object")
         except urllib.error.HTTPError as exc:  # 404 on firmware without this path
+            last = exc
+        except ValueError as exc:
+            # 3.25.x answers /a/sysinfo with HTTP 200 and an HTML error page ("Unable to open
+            # source file /app/partial/sysinfo.ut"): not this firmware's path, try the next.
             last = exc
         except urllib.error.URLError as exc:  # port 8080 closed on newer firmware
             last = exc

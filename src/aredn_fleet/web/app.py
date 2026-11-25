@@ -179,6 +179,7 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             job.log(f"Crawling the mesh from {req.start}…")
             res = await asyncio.to_thread(crawl, req.start)
             state.set_discovery(res.topology, res.nodes, res.errors, res.start)
+            await tiny_check(mark_tiny_builds, list(res.nodes))
             job.log(f"Found {len(res.nodes)} nodes and {len(res.topology.links)} links; "
                     f"manager attached at {res.start}")
             for n, e in res.errors.items():
@@ -372,7 +373,9 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             for ap, sta in ptmp_pairs(state.topology.links, state.radios):
                 aps.setdefault(sta, set()).add(ap)
             # OLSR -> Babel: judged on the whole mesh (each node's protocol from its firmware).
-            protocols = {n: routing_of((state.nodes.get(n) or {}).get("firmware", ""))
+            await tiny_check(mark_tiny_builds, list(state.topology.nodes))
+            protocols = {n: routing_of((state.nodes.get(n) or {}).get("firmware", ""),
+                                       n not in state.no_babel)
                          for n in state.topology.nodes}
             blocked = migration_blocks(state.topology, state.root or "", req.nodes, release.version,
                                        protocols, ("TUN",) if req.exclude_tunnels else ())
@@ -534,6 +537,37 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
         title = f"{'Radio change' if req.execute else 'Radio dry run'} ({len(req.nodes)} nodes)"
         return start("radio", title, req.execute, body, fp, dry_run=not req.execute)
+
+    async def tiny_check(fn, names) -> None:
+        try:
+            await asyncio.wait_for(asyncio.to_thread(fn, names), 30)
+        except Exception:  # noqa: BLE001 - slow or offline catalog: labels stay as they were
+            pass
+
+    def mark_tiny_builds(names: list[str]) -> None:
+        """Note hardware whose newest release is below 4.0 (tiny builds have no Babel).
+        Uses the release catalog (cached on disk); if it can't be read, nothing is marked."""
+        from ..routing import DUAL, routing_of, tiny_build
+        # Only 3.25.5-3.25.10 nodes are in doubt (full build: OLSR+Babel; tiny build: OLSR).
+        names = [n for n in names
+                 if routing_of((state.nodes.get(n) or {}).get("firmware", "")) == DUAL]
+        if not names:
+            return
+        try:
+            index = ReleaseIndex(Catalog(state.mirror), state.fw_dir / "catalog")
+        except Exception:  # noqa: BLE001
+            return
+        for n in names:
+            info = state.nodes.get(n) or {}
+            board = str(info.get("board_id") or "")
+            try:
+                last = index.final_release(board if "," in board else "", str(info.get("model") or ""))
+            except Exception:  # noqa: BLE001 - offline: leave as is
+                continue
+            if tiny_build(last):
+                state.no_babel.add(n)
+            else:
+                state.no_babel.discard(n)
 
     def old_firmware_reason(n: str) -> str | None:
         """Radio and settings jobs need the ucode web UI (3.25.5 and later); say so plainly."""

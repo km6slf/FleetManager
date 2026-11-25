@@ -79,3 +79,36 @@ def test_final_release_for_hardware(tmp_path):
     n = len(calls)
     idx.final_release("ubnt,nanostation-m", "")
     assert len([c for c in calls[n:] if "overview" in c or c.endswith(".json") and "config" not in c]) == 0
+
+
+def test_html_error_page_with_200_falls_through_to_cgi(monkeypatch):
+    """3.25.x answers /a/sysinfo with HTTP 200 and an HTML error page; use the cgi path."""
+    import io
+    import urllib.request
+    from aredn_fleet import discovery
+
+    seen = []
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake(url, timeout=0):
+        seen.append(url)
+        if "/a/sysinfo" in url:
+            return Resp(b"<div><b>ERROR: Unable to open source file /app/partial/sysinfo.ut</b></div>")
+        return Resp(b'{"api_version": "1.14", "node": "N"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    assert discovery.http_fetch("n")["node"] == "N"
+    assert "/cgi-bin/sysinfo.json" in seen[-1]
+
+
+def test_tiny_builds_are_olsr_only():
+    from aredn_fleet.routing import DUAL, OLSR, routing_of, tiny_build
+    assert routing_of("3.25.5.1") == DUAL
+    assert routing_of("3.25.5.1", babel_build=False) == OLSR
+    assert tiny_build("3.25.5.1") and not tiny_build("4.26.10.0") and not tiny_build(None)

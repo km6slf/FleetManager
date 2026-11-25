@@ -145,6 +145,7 @@ class AppState:
         self.creds_path = self.config_dir / "credentials.json"
         self.topo_path = self.config_dir / "mesh.json"
         self.audit_path = self.config_dir / "audit.jsonl"
+        self.no_babel: set[str] = set()   # tiny-build hardware: OLSR only on every release
         self.known_hosts = self.config_dir / "known_hosts"
         self.overrides_path = self.config_dir / "overrides.json"
         self.mirror = "https://downloads.arednmesh.org/"
@@ -291,7 +292,7 @@ class AppState:
                 "custom": custom_summary(self.overrides.get(n)),
                 "radios_read_at": (self.radios.get(n) or {}).get("read_at"),
                 "gateway": info.get("gateway"),
-                "routing": routing_of(info.get("firmware", "")),
+                "routing": routing_of(info.get("firmware", ""), n not in self.no_babel),
             })
         return {"root": self.root, "discovered_at": self.discovered_at, "nodes": nodes,
                 "links": [l.__dict__ for l in self.topology.links]}
