@@ -151,7 +151,10 @@ dialog.wide { width: min(980px, 94vw); }
 .ledger .st-skip { color: var(--muted); }
 .ledger .st-go { color: var(--ok); font-weight: 600; }
 .ledger .own { color: #8250df; font-weight: 600; }
-.ledger .why { white-space: normal; color: var(--danger); }
+.ledger .why { white-space: normal; color: var(--danger); min-width: 220px; max-width: 420px; }
+.ledger button.drop { padding: 2px 8px; font-size: 11px; }
+.drop-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+.drop-tools button { padding: 3px 10px; font-size: 12px; }
 .ledger .lost { white-space: normal; color: var(--warn); }
 .summary-line { font-size: 13px; margin: 4px 0; }
 

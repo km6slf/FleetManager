@@ -184,18 +184,15 @@ $("#btn-up-dry").addEventListener("click", () => guarded(async () => {
   followJob(job.id);
 }));
 $("#btn-up-go").addEventListener("click", (e) => guarded(async () => {
-  const b = upgradeBody(false);
-  if (!b.version) throw new Error("Download firmware first (Firmware tab)");
-  const btn = e.currentTarget;
-  busy(btn, true);
-  let review;
-  try { review = await runAndWait("/api/upgrade", b, "Checking every selected node…"); } finally { busy(btn, false); }
-  const r = review.result;
-  const go = r.results.filter((x) => x.status === "would-upgrade").length;
-  if (!go && !r.blocked.length) { toast("Nothing to upgrade: every selected node is already on " + r.version); return; }
-  const ok = await confirmDialog(`Review: upgrade to ${r.version}`, upgradeLedger(r), "upgrade",
-    { wide: true, blocked: r.blocked.length > 0 });
-  if (!ok) return;
+  if (!upgradeBody(false).version) throw new Error("Download firmware first (Firmware tab)");
+  const done = await reviewLoop(e.currentTarget, "/api/upgrade", () => upgradeBody(false), "Checking every selected node…", (r) => {
+    const go = r.results.filter((x) => x.status === "would-upgrade").length;
+    if (!go && !r.blocked.length) { toast("Nothing to upgrade: every selected node is already on " + r.version); return false; }
+    return confirmDialog(`Review: upgrade to ${r.version}`, upgradeLedger(r), "upgrade",
+      { wide: true, blocked: r.blocked.length > 0 });
+  });
+  if (!done) return;
+  const { body: b, review } = done;
   const job = await api("/api/upgrade", { body: { ...b, execute: true, confirm: "upgrade", reviewed_job: review.id } });
   followJob(job.id, { onDone: () => loadTopology() });
 }));
@@ -514,17 +511,15 @@ $("#btn-ra-dry").addEventListener("click", () => guarded(async () => {
   followJob((await api("/api/radio", { body: radioBody(false) })).id, { onDone: () => loadTopology() });
 }));
 $("#btn-ra-go").addEventListener("click", (e) => guarded(async () => {
-  const b = radioBody(false);
-  const btn = e.currentTarget;
-  busy(btn, true);
-  let review;
-  try { review = await runAndWait("/api/radio", b, "Reading every selected node's radios…"); } finally { busy(btn, false); }
-  const r = review.result;
-  const changing = r.clusters.flatMap((c) => c.nodes).filter((n) => n.status === "would-change").length;
-  if (!changing && !r.blocked.length) { toast("Nothing to change: the selected nodes are already set that way"); return; }
-  const ok = await confirmDialog("Review: radio changes", radioLedger(r), "switch",
-    { wide: true, blocked: r.blocked.length > 0 });
-  if (!ok) return;
+  radioBody(false);  // validate the form before checking anything
+  const done = await reviewLoop(e.currentTarget, "/api/radio", () => radioBody(false), "Reading every selected node's radios…", (r) => {
+    const changing = r.clusters.flatMap((c) => c.nodes).filter((n) => n.status === "would-change").length;
+    if (!changing && !r.blocked.length) { toast("Nothing to change: the selected nodes are already set that way"); return false; }
+    return confirmDialog("Review: radio changes", radioLedger(r), "switch",
+      { wide: true, blocked: r.blocked.length > 0 });
+  });
+  if (!done) return;
+  const { body: b, review } = done;
   const job = await api("/api/radio", { body: { ...b, execute: true, confirm: "switch", reviewed_job: review.id } });
   followJob(job.id, { onDone: () => loadTopology() });
 }));
@@ -603,7 +598,7 @@ function settingsLedger(r) {
   let changing = 0;
   const rows = r.results.map((x, i) => {
     const head = `<td>${i + 1}</td><td><b>${esc(x.node)}</b></td>`;
-    if (x.status === "failed") return `<tr>${head}<td colspan="2"></td><td class="st-blocked">BLOCKED</td><td class="why">${esc(x.detail)}</td></tr>`;
+    if (x.status === "failed") return `<tr>${head}<td colspan="2"></td><td class="st-blocked">BLOCKED</td><td class="why">${esc(x.detail)}</td><td>${dropBtn(x.node)}</td></tr>`;
     if (x.status === "would-change") changing += 1;
     return (x.steps || []).map((s, j) => {
       const st = s.status === "change" ? '<span class="st-go">will change</span>'
@@ -611,12 +606,13 @@ function settingsLedger(r) {
         : `<span class="st-skip">skipped</span>`;
       const val = s.status === "change" || s.status === "unchanged"
         ? cell(word(s.before), word(s.after)) : `<td class="same">${esc(word(s.before))}</td>`;
-      return `<tr>${j === 0 ? head : "<td></td><td></td>"}<td>${esc(s.label)}</td>${val}<td>${st}</td><td class="why">${esc(s.detail || "")}</td></tr>`;
+      return `<tr>${j === 0 ? head : "<td></td><td></td>"}<td>${esc(s.label)}</td>${val}<td>${st}</td><td class="why">${esc(s.detail || "")}</td><td>${j === 0 ? dropBtn(x.node) : ""}</td></tr>`;
     }).join("");
   }).join("");
   return `<p class="summary-line"><b>${changing}</b> node(s) will change, one at a time, outermost first (the node this computer connects through last). Each change uses the node's own save and commit steps and is read back before the next node; the run stops at the first failure.</p>
-    <table class="ledger"><thead><tr><th>#</th><th>Node</th><th>Setting (node's label)</th><th>Now → after</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>
-    ${r.blocked.length ? `<p class="st-blocked">Blocked: ${esc(r.blocked.join(", "))}. Fix these (or deselect them) and review again.</p>` : ""}`;
+    ${dropTools([["blocked", r.blocked], ["with nothing to change", r.results.filter((x) => x.status !== "failed" && x.status !== "would-change").map((x) => x.node)]])}
+    <table class="ledger"><thead><tr><th>#</th><th>Node</th><th>Setting (node's label)</th><th>Now → after</th><th>Status</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>
+    ${r.blocked.length ? `<p class="st-blocked">Blocked: ${esc(r.blocked.join(", "))}. Fix these, or press Remove to deselect them and check again.</p>` : ""}`;
 }
 
 $("#btn-read-settings").addEventListener("click", () => guarded(async () => {
@@ -630,18 +626,16 @@ $("#btn-se-dry").addEventListener("click", () => guarded(async () => {
   followJob((await api("/api/settings", { body: settingsBody(false) })).id, { onDone: () => loadSettingsPanel() });
 }));
 $("#btn-se-go").addEventListener("click", (e) => guarded(async () => {
-  const b = settingsBody(false);
-  const btn = e.currentTarget;
-  busy(btn, true);
-  let review;
-  try { review = await runAndWait("/api/settings", b, "Reading every selected node's settings…"); } finally { busy(btn, false); }
-  const r = review.result;
-  if (!r.results.some((x) => x.status === "would-change") && !r.blocked.length) {
-    toast("Nothing to change: the selected nodes are already set that way (or don't have these switches)");
-    return;
-  }
-  const ok = await confirmDialog("Review: settings changes", settingsLedger(r), "apply", { wide: true, blocked: r.blocked.length > 0 });
-  if (!ok) return;
+  settingsBody(false);
+  const done = await reviewLoop(e.currentTarget, "/api/settings", () => settingsBody(false), "Reading every selected node's settings…", (r) => {
+    if (!r.results.some((x) => x.status === "would-change") && !r.blocked.length) {
+      toast("Nothing to change: the selected nodes are already set that way (or don't have these switches)");
+      return false;
+    }
+    return confirmDialog("Review: settings changes", settingsLedger(r), "apply", { wide: true, blocked: r.blocked.length > 0 });
+  });
+  if (!done) return;
+  const { body: b, review } = done;
   const job = await api("/api/settings", { body: { ...b, execute: true, confirm: "apply", reviewed_job: review.id } });
   followJob(job.id, { onDone: () => loadSettingsPanel() });
 }));
@@ -661,6 +655,28 @@ async function runAndWait(path, body, label) {
   }
 }
 
+// "Remove" for one row, and buttons to remove every blocked / unchanged node at once.
+const dropBtn = (node) => `<button type="button" class="ghost drop" data-drop="${esc(node)}" title="Deselect this node and check again">Remove</button>`;
+function dropTools(groups) {
+  const btns = groups.filter(([, nodes]) => nodes.length).map(([label, nodes]) =>
+    `<button type="button" class="ghost" data-drop="${esc(nodes.join(","))}">Remove ${esc(label)} (${nodes.length})</button>`).join("");
+  return btns ? `<div class="drop-tools">${btns}<span class="muted small">Removed nodes are deselected and the plan is checked again.</span></div>` : "";
+}
+
+// Review, let the user remove nodes, review again, until they confirm or cancel.
+async function reviewLoop(btn, path, makeBody, label, show) {
+  for (;;) {
+    if (!state.selected.size) { toast("No nodes left selected"); return null; }
+    const b = makeBody();
+    busy(btn, true);
+    let review;
+    try { review = await runAndWait(path, b, label); } finally { busy(btn, false); }
+    const ok = await show(review.result);
+    if (ok === "recheck") continue;
+    return ok ? { body: b, review } : null;
+  }
+}
+
 function busy(btn, on) { btn.disabled = on; btn.dataset.label ||= btn.textContent; btn.textContent = on ? "Checking…" : btn.dataset.label; }
 
 function upgradeLedger(r) {
@@ -676,7 +692,7 @@ function upgradeLedger(r) {
         : '<span class="st-blocked">BLOCKED</span>';
       return `<tr><td><b>${esc(x.node)}</b>${x.routing_label ? `<div class="muted small">${esc(x.routing_label)}</div>` : ""}</td><td>${esc(x.model)}</td><td>${esc(x.profile || "")}</td>
         <td class="${x.from_version === x.to_version ? "same" : "chg"}">${esc(x.from_version || "?")}<span class="arrow">→</span><b>${esc(x.to_version)}</b></td>
-        <td>${st}</td><td class="why">${x.status === "failed" ? esc(x.detail) : ""}${(x.notes || []).map((n) => `<div class="lost">⚠ ${esc(n)}</div>`).join("")}</td></tr>`;
+        <td class="why">${st}${x.status === "failed" ? `<div>${esc(x.detail)}</div>` : ""}${(x.notes || []).map((n) => `<div class="lost">⚠ ${esc(n)}</div>`).join("")}</td><td>${dropBtn(x.node)}</td></tr>`;
     }).join("")).join("");
   const warns = [...(r.warnings || []), ...(r.unreachable?.length ? ["Skipped, unreachable or no known path: " + r.unreachable.join(", ")] : [])]
     .map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("");
@@ -685,8 +701,9 @@ function upgradeLedger(r) {
     <p class="summary-line">Before each node is flashed, its configuration is backed up to <code>${esc(r.backup_dir)}</code> (it can include the node's password hash and Wi-Fi keys; it stays on this computer).</p>
     ${apFirst ? `<p class="summary-line">PtMP access points go before their Mesh Stations: ${esc(apFirst)}.</p>` : ""}
     ${r.rc ? `<p class="summary-line"><b>Release-candidate checks are on:</b> Mesh Stations wait for their access point to run 4.26.7.0 or the RC; AC radios using channels 48, 52, 56 or 64 (also through a wide channel) are blocked; IPQ40xx nodes on 4.26.7.0 are flagged for a possible power cycle.</p>` : ""}
+    ${dropTools([["blocked", r.blocked], ["already current", r.results.filter((x) => x.status === "skipped").map((x) => x.node)]])}
     <table class="ledger"><thead><tr><th>Node</th><th>Model</th><th>Image</th><th>Firmware</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>${warns}
-    ${r.blocked.length ? `<p class="st-blocked">Blocked: ${esc(r.blocked.join(", "))}. Fix these (or deselect them) and review again.</p>` : ""}`;
+    ${r.blocked.length ? `<p class="st-blocked">Blocked: ${esc(r.blocked.join(", "))}. Fix these, or press Remove to deselect them and check again.</p>` : ""}`;
 }
 
 function cell(before, after) {
@@ -703,24 +720,25 @@ function radioLedger(r) {
     const rows = c.nodes.map((n) => {
       const own = n.own ? ' <span class="own">own settings</span>' : "";
       if (n.status === "failed") {
-        return `<tr><td><b>${esc(n.node)}</b>${own}</td><td colspan="5"></td><td class="st-blocked">BLOCKED</td><td class="why">${esc(n.detail)}</td></tr>`;
+        return `<tr><td><b>${esc(n.node)}</b>${own}</td><td colspan="5"></td><td class="st-blocked">BLOCKED</td><td class="why">${esc(n.detail)}</td><td>${dropBtn(n.node)}</td></tr>`;
       }
       if (!n.ledger.length || n.status === "unchanged") {
-        return `<tr><td><b>${esc(n.node)}</b>${own}</td><td colspan="5" class="same">${esc(n.detail || "no change")}</td><td class="st-skip">unchanged</td><td></td></tr>`;
+        return `<tr><td><b>${esc(n.node)}</b>${own}</td><td colspan="5" class="same">${esc(n.detail || "no change")}</td><td class="st-skip">unchanged</td><td></td><td>${dropBtn(n.node)}</td></tr>`;
       }
       changing += 1;
       return n.ledger.map((l, i) => `<tr>
         <td>${i === 0 ? `<b>${esc(n.node)}</b>${own}` : ""}</td><td>${esc(l.band_label)}</td>
         ${cell(l.before.mode, l.after.mode)}${cell(l.before.channel, l.after.channel)}${cell(l.before.width, l.after.width)}${cell(netCell(l.before), netCell(l.after))}
         <td>${i === 0 ? '<span class="st-go">will change</span>' : ""}</td>
-        <td class="lost">${i === 0 && n.lost_links.length ? "will lose RF link to " + esc(n.lost_links.join(", ")) + " (intended)" : ""}</td></tr>`).join("");
+        <td class="lost">${i === 0 && n.lost_links.length ? "will lose RF link to " + esc(n.lost_links.join(", ")) + " (intended)" : ""}</td><td>${i === 0 ? dropBtn(n.node) : ""}</td></tr>`).join("");
     }).join("");
-    return `<tr class="group"><td colspan="8">RF cluster ${c.index}: these nodes switch at the same moment</td></tr>${rows}`;
+    return `<tr class="group"><td colspan="9">RF cluster ${c.index}: these nodes switch at the same moment</td></tr>${rows}`;
   }).join("");
   const warns = (r.warnings || []).map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("");
   return `<p class="summary-line"><b>${changing}</b> node(s) will change. Nodes reboot if AREDN needs it, and each puts its old settings back unless every node in its cluster is seen on the new settings with the RF links it should have.</p>
-    <table class="ledger"><thead><tr><th>Node</th><th>Radio</th><th>Purpose</th><th>Channel</th><th>Width</th><th>SSID / network</th><th>Status</th><th></th></tr></thead><tbody>${body}</tbody></table>${warns}
-    ${r.blocked.length ? `<p class="st-blocked">Blocked: ${esc(r.blocked.join(", "))}. Fix these (or deselect them) and review again.</p>` : ""}`;
+    ${dropTools([["blocked", r.blocked], ["unchanged", r.clusters.flatMap((c) => c.nodes).filter((n) => n.status !== "failed" && (n.status === "unchanged" || !n.ledger.length)).map((n) => n.node)]])}
+    <table class="ledger"><thead><tr><th>Node</th><th>Radio</th><th>Purpose</th><th>Channel</th><th>Width</th><th>SSID / network</th><th>Status</th><th></th><th></th></tr></thead><tbody>${body}</tbody></table>${warns}
+    ${r.blocked.length ? `<p class="st-blocked">Blocked: ${esc(r.blocked.join(", "))}. Fix these, or press Remove to deselect them and check again.</p>` : ""}`;
 }
 
 // ------------------------------------------------------------------ confirm dialog
@@ -732,12 +750,22 @@ function confirmDialog(title, html, word, { wide = false, blocked = false } = {}
   $("#cf-word").textContent = word;
   const input = $("#cf-input"), ok = $("#cf-ok");
   input.value = "";
+  d.returnValue = "";
   ok.disabled = true;
   input.disabled = blocked;
   input.placeholder = blocked ? "Fix the blocked nodes first" : "";
   input.oninput = () => (ok.disabled = blocked || input.value.trim().toLowerCase() !== word);
+  // Remove buttons in the ledger: deselect those nodes and check again (what you confirm
+  // must be exactly what was reviewed, so the plan is rebuilt rather than edited here).
+  $("#cf-body").onclick = (e) => {
+    const b = e.target.closest("[data-drop]");
+    if (!b) return;
+    b.dataset.drop.split(",").filter(Boolean).forEach((n) => state.selected.delete(n));
+    renderNodes();
+    d.close("recheck");
+  };
   return new Promise((resolve) => {
-    d.onclose = () => resolve(d.returnValue === "ok" && !ok.disabled);
+    d.onclose = () => resolve(d.returnValue === "recheck" ? "recheck" : d.returnValue === "ok" && !ok.disabled);
     d.showModal();
     input.focus();
   });

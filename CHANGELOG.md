@@ -14,6 +14,7 @@ Every build shows its exact build number at the top right of the window (for exa
 - **Older (3.x) nodes:** the upgrade script never actually stopped the services listed in the node's `upgrade_prepare.sh` before flashing (a Python escape turned the `sed` back-reference into a control character). It now stops them, except `dropbear`, as the node's own Firmware page does.
 
 ### Added
+- **Remove nodes from the review screen.** Each node in the upgrade, radio and settings reviews has a **Remove** button, and the top has **Remove blocked** and **Remove already current** (or **unchanged**). Removing deselects the node and checks the plan again, since a blocked node locks the Go button and Go only runs the plan you reviewed. The reason a node is blocked now sits under its status instead of in a column cut off at the right.
 - The exact build number in the window, the Docker image and the first line of every job log, so you can tell which build you're running and which build produced a log.
 - This changelog.
 - **Docker version** (Linux amd64/arm64 and Windows containers) published as `ghcr.io/km6slf/fleetmanager`, with Compose file, example settings and install/upgrade instructions in the README. Saved passwords go in an encrypted file in the data volume; the access link stays the same across restarts and upgrades.

@@ -146,6 +146,8 @@ Windows containers (Docker switched to "Windows containers"): the same, but with
 
 Every change follows the same pattern: **Dry run** (read-only; logs in and checks every selected node) → **review** what will happen → type the confirmation word (`upgrade`, `switch` or `apply`) → it runs, logging to the **Activity** tab, where you can copy or save the log.
 
+In the review, **Remove** next to a node (or **Remove blocked** / **Remove already current** at the top) deselects it and checks the plan again. A blocked node keeps the Go button locked, so this is how you go ahead with the rest. What runs is always exactly what you reviewed last.
+
 ## Firmware upgrades
 - **Preview order** shows the waves: outermost nodes first, your own node last, so nothing is upgraded while a node behind it still needs to be reached. Nodes that are the only path to others are flagged.
 - **Dry run** checks each node: login, board name, exactly one matching image, free RAM, and whether it's already on that version.
