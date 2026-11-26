@@ -121,7 +121,7 @@ class Plan:
                 parts.append(f"{n} (hop {d}, cuts off {cut})")
             lines.append(f"Wave {i}: " + ", ".join(parts))
         if self.unreachable:
-            lines.append("Skipped, not reachable: " + ", ".join(sorted(self.unreachable)))
+            lines.append("Skipped, unreachable or no known path: " + ", ".join(sorted(self.unreachable)))
         for w in self.warnings:
             lines.append(f"WARNING: {w}")
         return "\n".join(lines)

@@ -113,6 +113,7 @@ class DiscoveryResult:
     nodes: dict[str, NodeInfo]
     errors: dict[str, str]
     start: str = ""  # real name of the node discovery started from (the manager's root)
+    from_list: list[str] = field(default_factory=list)  # found only via the node list
 
 
 def _system_address(node: str) -> str | None:
@@ -125,8 +126,25 @@ def _system_address(node: str) -> str | None:
         return None
 
 
+def node_list(node: str) -> list[str]:
+    """Every node name the given node's routing table knows (``sysinfo.json?nodes=1``).
+
+    Neighbour lists only show direct links that have a name, so a walk over them can miss
+    parts of the mesh (reached over a tunnel, or past a node that doesn't list its links).
+    The node list is what the node's own mesh status page shows. Older firmware that
+    doesn't support the query gives an empty list."""
+    data = http_fetch(node, query="nodes=1")
+    out = []
+    for entry in data.get("nodes") or []:
+        name = entry.get("name") if isinstance(entry, dict) else entry
+        if isinstance(name, str) and name:
+            out.append(normalize(name))
+    return out
+
+
 def crawl(start: str = "localnode", fetch: Fetcher = http_fetch, workers: int = 8,
-          max_nodes: int = 1000) -> DiscoveryResult:
+          max_nodes: int = 1000,
+          list_nodes: Callable[[str], list[str]] | None = None) -> DiscoveryResult:
     topo = Topology()
     nodes: dict[str, NodeInfo] = {}
     errors: dict[str, str] = {}
@@ -159,32 +177,49 @@ def crawl(start: str = "localnode", fetch: Fetcher = http_fetch, workers: int = 
     frontier = [first.name]
     results = {first.name: parsed}
 
+    if list_nodes is None and fetch is http_fetch:
+        list_nodes = node_list
+    seeded: list[str] = []
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        while frontier and len(nodes) < max_nodes:
-            next_frontier: list[str] = []
-            to_fetch = [n for n in frontier if n not in results]
-            for name, parsed, err in pool.map(one, to_fetch):
-                if parsed is None:
-                    errors[name] = err or "unknown error"
+        def walk(frontier: list[str]) -> None:
+            while frontier and len(nodes) < max_nodes:
+                next_frontier: list[str] = []
+                to_fetch = [n for n in frontier if n not in results]
+                for name, parsed, err in pool.map(one, to_fetch):
+                    if parsed is None:
+                        errors[name] = err or "unknown error"
+                        topo.nodes.add(name)
+                    else:
+                        results[name] = parsed
+                for name in frontier:
+                    if name not in results:
+                        continue
+                    info, neigh = results[name]
+                    nodes[name] = info
                     topo.nodes.add(name)
-                else:
-                    results[name] = parsed
-            for name in frontier:
-                if name not in results:
-                    continue
-                info, neigh = results[name]
-                nodes[name] = info
-                topo.nodes.add(name)
-                for other, kind in neigh:
-                    topo.add_link(name, other, kind)
-                    if other not in seen:
-                        seen.add(other)
-                        next_frontier.append(other)
-            frontier = next_frontier
+                    for other, kind in neigh:
+                        topo.add_link(name, other, kind)
+                        if other not in seen:
+                            seen.add(other)
+                            next_frontier.append(other)
+                frontier = next_frontier
+
+        walk(frontier)
+        # Then every node the start node's routing table knows that the walk didn't reach.
+        # Their own neighbour lists usually connect them back into the map.
+        if list_nodes is not None:
+            try:
+                known = list_nodes(first.name)
+            except (urllib.error.URLError, OSError, ValueError):
+                known = []
+            seeded = sorted({normalize(n) for n in known} - seen)
+            seen.update(seeded)
+            walk(seeded)
 
     # Each link is reported from both ends; keep one copy per (pair, kind).
     uniq = {}
     for link in topo.links:
         uniq.setdefault((frozenset((link.a, link.b)), link.kind), link)
     topo.links = list(uniq.values())
-    return DiscoveryResult(topo, nodes, errors, first.name)
+    return DiscoveryResult(topo, nodes, errors, first.name, seeded)

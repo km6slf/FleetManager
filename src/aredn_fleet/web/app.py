@@ -28,7 +28,7 @@ from .. import __version__, paths
 from ..credentials import Credential, forget_password, store_password
 from ..discovery import crawl
 from ..firmware import Catalog, Channel, FirmwareStore, ReleaseIndex, match_profile, select_channels
-from ..topology import PlanError, plan_rollout
+from ..topology import PlanError, hop_distances, plan_rollout
 from ..transport import errtext, transient, with_retries
 from .state import AppState, Job, JobBusy, radio_options
 
@@ -186,6 +186,17 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
             await tiny_check(mark_tiny_builds, list(res.nodes))
             job.log(f"Found {len(res.nodes)} nodes and {len(res.topology.links)} links; "
                     f"manager attached at {res.start}")
+            if res.from_list:
+                job.log(f"{len(res.from_list)} of them aren't anyone's direct neighbour here; "
+                        f"found from {res.start}'s node list: {', '.join(res.from_list)}")
+            adj = res.topology.adjacency()
+            dist = hop_distances(adj, res.start) if res.start in adj else {res.start: 0}
+            pathless = sorted(n for n in res.nodes if n not in dist)
+            if pathless:
+                job.log("No known path to " + ", ".join(pathless) + ": none of the nodes "
+                        "read lists a link to them (likely a tunnel or a link without a "
+                        "name). They can be read and changed, but upgrades skip them because "
+                        "a safe order can't be worked out.", "warn")
             for n, e in res.errors.items():
                 job.log(f"{n}: unreachable ({e})", "warn")
                 for line in await asyncio.to_thread(link_lines, n):

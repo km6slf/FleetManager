@@ -92,7 +92,9 @@ function renderNodes() {
     return `<tr data-node="${esc(n.name)}" class="${sel ? "sel" : ""}">
       <td class="chk"><input type="checkbox" ${sel ? "checked" : ""} tabindex="-1"></td>
       <td><b>${esc(n.name)}</b> ${n.name === state.topo.root ? '<span class="badge root">this computer</span>' : ""}
-          ${n.reachable ? "" : '<span class="badge failed">unreachable</span>'}
+          ${n.reachable ? "" : n.answered
+            ? '<span class="badge failed" title="It answers, but none of the nodes read lists a link to it (likely a tunnel or a link without a name). Upgrades skip it because a safe order can\'t be worked out.">no known path</span>'
+            : '<span class="badge failed">unreachable</span>'}
           ${n.gateway ? '<span class="badge gateway" title="Shares its internet (WAN) connection with the mesh">gateway</span>' : ""}
           ${ROUTING_BADGE[n.routing] || ""}
           ${n.custom ? `<span class="badge custom" data-edit="${esc(n.name)}" title="${esc(n.custom.text + (n.custom.note ? " — " + n.custom.note : ""))}">custom</span>` : ""}</td>
@@ -167,7 +169,7 @@ function upgradeBody(execute, confirm = "") {
 }
 function planHtml(p) {
   const waves = p.waves.map((w, i) => `<li>${w.map(esc).join(", ")}</li>`).join("");
-  const warns = [...p.warnings, ...(p.unreachable.length ? ["Skipped, unreachable: " + p.unreachable.join(", ")] : [])]
+  const warns = [...p.warnings, ...(p.unreachable.length ? ["Skipped, unreachable or no known path: " + p.unreachable.join(", ")] : [])]
     .map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("");
   return `<p class="hint">Order (outermost first, this computer's node last):</p><ol>${waves}</ol>${warns}`;
 }
@@ -676,7 +678,7 @@ function upgradeLedger(r) {
         <td class="${x.from_version === x.to_version ? "same" : "chg"}">${esc(x.from_version || "?")}<span class="arrow">→</span><b>${esc(x.to_version)}</b></td>
         <td>${st}</td><td class="why">${x.status === "failed" ? esc(x.detail) : ""}${(x.notes || []).map((n) => `<div class="lost">⚠ ${esc(n)}</div>`).join("")}</td></tr>`;
     }).join("")).join("");
-  const warns = [...(r.warnings || []), ...(r.unreachable?.length ? ["Skipped, unreachable: " + r.unreachable.join(", ")] : [])]
+  const warns = [...(r.warnings || []), ...(r.unreachable?.length ? ["Skipped, unreachable or no known path: " + r.unreachable.join(", ")] : [])]
     .map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("");
   const apFirst = (r.ptmp_order || []).map(([a, s]) => `${a} before ${s}`).join(", ");
   return `<p class="summary-line"><b>${go}</b> node(s) will be upgraded to <b>${esc(r.version)}</b> (${esc(r.channel)}; routing: ${esc(r.target_routing || "?")}), outermost first, one wave at a time. Each wave is checked before the next starts, and the run stops at the first failure.</p>

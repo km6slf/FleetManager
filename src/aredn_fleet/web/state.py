@@ -364,6 +364,7 @@ class AppState:
                 "name": n, "firmware": info.get("firmware", ""), "model": info.get("model", ""),
                 "hop": dist.get(n), "cuts_off": sorted(deps.get(n, ())) if n != self.root else [],
                 "reachable": n in dist, "error": self.errors.get(n, ""),
+                "answered": n in self.nodes and n not in self.errors,
                 "channel": rf.get("channel"), "chanbw": rf.get("chanbw"), "rfmode": rf.get("mode"),
                 "neighbours": sorted(adj.get(n, ())),
                 "radios": radio_summary(self.radios.get(n)),
