@@ -565,6 +565,8 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
                 for r in rep.results.values():
                     lvl = {"failed": "error", "confirmed": "ok", "unchanged": "info"}.get(r.status, "info")
                     job.log(f"{r.node}: {r.status} — {r.detail or r.before}", lvl)
+                    for note in r.notes:
+                        job.log(f"{r.node}: {note}", "warn")
                 out["clusters"].append({"index": i, "reason": rep.reason, "confirmed": rep.confirmed,
                                         "nodes": [{**asdict(r), "own": bool(state.overrides.get(r.node))}
                                                   for r in rep.results.values()]})

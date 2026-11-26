@@ -711,6 +711,13 @@ def cluster_warnings(topo: Topology, selected: set[str]) -> list[str]:
 
 # --------------------------------------------------------------------------- on-node script
 
+def _fmt_offset(sec: float) -> str:
+    a = abs(sec)
+    txt = (f"{a:.0f} s" if a < 120 else f"{a / 60:.0f} min" if a < 7200
+           else f"{a / 3600:.1f} h" if a < 172800 else f"{a / 86400:.1f} days")
+    return ("+" if sec >= 0 else "-") + txt
+
+
 def build_apply_script(sets: list[tuple[int, str, str]], apply_at: int, revert_after: int) -> str:
     """Shell script run on the node.
 
@@ -850,7 +857,8 @@ class RadioConfig:
     lead_seconds: float = 90        # time from arming the last node to the switch
     revert_after: int = 600         # node reverts unless confirmed within this
     poll_interval: float = 15
-    max_clock_skew: float = 20
+    max_clock_skew: float = 20      # beyond this the review notes the node's clock is off
+    max_clock_rtt: float = 8        # reading a node's clock slower than this: can't time it
 
 
 @dataclass
@@ -861,6 +869,7 @@ class RadioNodeResult:
     before: str = ""
     ledger: list[dict[str, Any]] = field(default_factory=list)   # per radio: before -> after
     lost_links: list[str] = field(default_factory=list)          # RF links dropped on purpose
+    notes: list[str] = field(default_factory=list)               # shown in the review
 
 
 @dataclass
@@ -974,8 +983,10 @@ async def run_radio_change(cluster: list[str],
             r.status, r.detail = "unchanged", "; ".join(plan.notes) or "already set that way"
             continue
         if abs(node_time - now()) > cfg.max_clock_skew:
-            r.status, r.detail = "failed", f"clock off by {node_time - now():+.0f}s; fix NTP first"
-            continue
+            # Nodes off the Internet often have no time. The switch is scheduled in each node's
+            # own clock (offset measured when arming), so a wrong clock only gets a note.
+            r.notes.append(f"clock off by {_fmt_offset(node_time - now())} (no NTP?); the switch "
+                           f"is scheduled in the node's own time, so this doesn't matter")
         if hook != "ok":
             r.status, r.detail = "failed", ("node doesn't run /etc/rc.local at boot; the revert "
                                             "timer couldn't survive a reboot")
@@ -1019,11 +1030,22 @@ async def run_radio_change(cluster: list[str],
         settings={n: safe_sets(plans[n]) for n in targets})
     armed: list[str] = []
     for n in targets:
-        script = build_apply_script(plans[n].sets, apply_at, cfg.revert_after)
         try:
             s = await connect(n)
             tmp = None
             try:
+                # Switch at the same moment everywhere, in each node's own clock: nodes off the
+                # Internet often have the wrong time. The script reads its clock once and then
+                # sleeps, so a clock that jumps later (NTP arriving) doesn't move the switch.
+                t0 = now()
+                node_now = int((await s.run("date +%s")).stdout.strip())
+                t1 = now()
+                if t1 - t0 > cfg.max_clock_rtt:
+                    raise RuntimeError(f"reading its clock took {t1 - t0:.0f}s; the link is too "
+                                       f"slow to time the switch")
+                offset = round(node_now - (t0 + t1) / 2)
+                log(n, "clock-offset", offset_s=offset)
+                script = build_apply_script(plans[n].sets, apply_at + offset, cfg.revert_after)
                 # The script can hold a hex-encoded Wi-Fi password: delete the local copy
                 # whatever happens.
                 with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:

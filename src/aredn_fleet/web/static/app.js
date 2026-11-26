@@ -730,7 +730,7 @@ function radioLedger(r) {
         <td>${i === 0 ? `<b>${esc(n.node)}</b>${own}` : ""}</td><td>${esc(l.band_label)}</td>
         ${cell(l.before.mode, l.after.mode)}${cell(l.before.channel, l.after.channel)}${cell(l.before.width, l.after.width)}${cell(netCell(l.before), netCell(l.after))}
         <td>${i === 0 ? '<span class="st-go">will change</span>' : ""}</td>
-        <td class="lost">${i === 0 && n.lost_links.length ? "will lose RF link to " + esc(n.lost_links.join(", ")) + " (intended)" : ""}</td><td>${i === 0 ? dropBtn(n.node) : ""}</td></tr>`).join("");
+        <td class="lost">${i === 0 && n.lost_links.length ? "will lose RF link to " + esc(n.lost_links.join(", ")) + " (intended)" : ""}${i === 0 ? (n.notes || []).map((t) => `<div>⚠ ${esc(t)}</div>`).join("") : ""}</td><td>${i === 0 ? dropBtn(n.node) : ""}</td></tr>`).join("");
     }).join("");
     return `<tr class="group"><td colspan="9">RF cluster ${c.index}: these nodes switch at the same moment</td></tr>${rows}`;
   }).join("");

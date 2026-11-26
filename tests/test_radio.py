@@ -194,8 +194,13 @@ class FakeCluster:
         self.apply_at, self.pending, self.scripts = {}, {}, {}
         self.confirmed, self.no_rclocal = set(), set()
 
+    def skew_of(self, n):
+        return self.skew.get(n, 0) if isinstance(self.skew, dict) else self.skew
+
     def _tick(self, n):
-        if n in self.apply_at and self.clock.now() >= self.apply_at[n] and n not in self.broken:
+        # Each node compares the switch time with its own (possibly wrong) clock.
+        if n in self.apply_at and self.clock.now() + self.skew_of(n) >= self.apply_at[n] \
+                and n not in self.broken:
             self.ch[n] = self.pending[n]
 
     async def sysinfo(self, n):
@@ -218,7 +223,7 @@ class FakeCluster:
                 if cmd.startswith("[ -f /etc/rc.local"):
                     return CommandResult(0, "" if n in fc.no_rclocal else "ok\n", "")
                 if cmd.startswith("date"):
-                    return CommandResult(0, str(int(fc.clock.now() + fc.skew)), "")
+                    return CommandResult(0, str(int(fc.clock.now() + fc.skew_of(n))), "")
                 if "trap '' HUP" in cmd and "sh /" in cmd:
                     s = fc.scripts[n]
                     fc.apply_at[n] = int(re.search(r"\[ (\d+) -gt", s).group(1))
@@ -274,10 +279,23 @@ def test_one_node_failing_means_nobody_confirms():
     assert fc.confirmed == set()                         # everyone reverts together
 
 
-def test_preflight_blocks_skew_missing_hook_and_bad_channel():
+def test_wrong_clocks_switch_together_in_each_nodes_own_time():
+    """Nodes off the Internet lose their time (field: about 5 days slow). The switch is
+    scheduled in each node's own clock, so they still switch at the same real moment."""
     clock = Clock()
-    fc = FakeCluster(["a"], clock, skew=300)
-    assert "clock" in go(fc, clock).results["a"].detail and not fc.apply_at
+    fc = FakeCluster(["a", "b", "c"], clock, skew={"a": -425604, "b": 0, "c": 3600})
+    dry = go(fc, clock, execute=False)
+    assert dry.results["a"].status == "would-change"
+    assert any("4.9 days" in n for n in dry.results["a"].notes)
+    assert not dry.results["b"].notes
+    rep = go(fc, clock)
+    assert rep.confirmed, rep.reason
+    real = {n: fc.apply_at[n] - fc.skew_of(n) for n in fc.nodes}
+    assert max(real.values()) - min(real.values()) <= 1
+
+
+def test_preflight_blocks_missing_hook_and_bad_channel():
+    clock = Clock()
     fc = FakeCluster(["a", "b"], clock)
     fc.no_rclocal = {"b"}
     assert "rc.local" in go(fc, clock).results["b"].detail and not fc.apply_at

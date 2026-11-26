@@ -108,10 +108,10 @@ How AREDN 4.26 stores and applies radio settings (read from a bench node):
 * `node-setup` derives the mesh SSID from the width (`AREDN-<bw>-v3`); for PtMP and PtP it also uses the channel. Nodes on different widths can't link at all.
 
 The job (`aredn-fleet radio`):
-1. **Preflight (read-only):** re-read every radio over SSH, refuse anything the node's own dialog wouldn't allow, and refuse if a node's clock is more than 20 s off. Dry run stops here.
+1. **Preflight (read-only):** re-read every radio over SSH, and refuse anything the node's own dialog wouldn't allow. A node whose clock is more than 20 s off gets a review note, not a block (field 2026-11-26: nodes off the Internet were ~5 days slow). Dry run stops here.
 2. **Arm:** upload a script to every node in the cluster.
    * The script backs up `setup` to flash (`/etc/aredn-fleet-radio/`) and installs a boot hook in `/etc/rc.local`, which is in the sysupgrade keep list.
-   * It sleeps until a **shared switch time**, applies the change through `aredn.configuration`, and reboots if AREDN flags that a reboot is required.
+   * It sleeps until a **shared switch time**, given **in that node's own clock**: when arming, Fleet Manager reads `date +%s` and brackets it with its own clock (offset = node − midpoint; refused if the read takes over 8 s), so wrong clocks still switch at the same real moment (±1 s). The script reads its clock once and then sleeps a duration, so a clock that jumps later (NTP arriving) doesn't move the switch. It then applies the change through `aredn.configuration`, and reboots if AREDN flags that a reboot is required.
    * A revert timer, counted from boot so it doesn't depend on NTP, **restores the backup and reboots unless the change is confirmed** within `revert_after` (default 600 s).
    * If arming fails on any node, the others are cancelled before the switch.
    * Preflight refuses nodes that don't run `rc.local` at boot.
