@@ -80,8 +80,15 @@ class FakeMesh:
                     return CommandResult(0, getattr(mesh, "fwcheck", ""), "")
                 if "board_name" in cmd:
                     return CommandResult(0, "ubnt,rocket-m\n", "")
+                if "mgr_stops=" in cmd:                  # what stopping the manager would free
+                    return CommandResult(0, f"mgr_stops={getattr(mesh, 'mgr_stops', 1)}\n"
+                                            f"mgr_rss={getattr(mesh, 'mgr_rss', 0)}\n"
+                                            "iperf_rss=0\ntmp_kb=\n", "")
+                if "/etc/init.d/manager stop" in cmd:
+                    mesh.mem[n] = mesh.mem.get(n, 30000) + getattr(mesh, "mgr_frees", 0)
                 if "meminfo" in cmd:
-                    return CommandResult(0, "MemTotal: 65536 kB\nMemAvailable: 30000 kB\n", "")
+                    m = getattr(mesh, "mem", {}).get(n, 30000)
+                    return CommandResult(0, f"MemTotal: 65536 kB\nMemAvailable: {m} kB\n", "")
                 if cmd.startswith("sha256sum"):
                     return CommandResult(0, hashlib.sha256(mesh.uploaded[n]).hexdigest() + "  f\n", "")
                 if "validate_firmware_image" in cmd:
@@ -493,3 +500,96 @@ def test_legacy_script_handoff_is_not_undone(tmp_path, pid1, handed_off):
     assert ('"nodeupgraded", "0"' in log) is not handed_off
     assert ("rm " in log) is not handed_off
     assert ("ERROR" in out) is not handed_off
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="runs the node's POSIX sh script")
+def test_legacy_script_stops_the_listed_services_except_dropbear(tmp_path):
+    """The services in upgrade_prepare.sh's SERVICES line are stopped to free RAM (a Python
+    escape once turned the sed's \\1 into a control character, so nothing was stopped)."""
+    from aredn_fleet.jobs.upgrade import legacy_upgrade_script
+    bin_, initd = tmp_path / "bin", tmp_path / "init.d"
+    bin_.mkdir()
+    initd.mkdir()
+    calls = tmp_path / "calls"
+    stubs = {"lua": "true", "sleep": "true", "killall": f'echo "killall $*" >> {calls}',
+             "fake-sysupgrade": "exit 0"}
+    for name, body in stubs.items():
+        (bin_ / name).write_text(f"#!/bin/sh\n{body}\n")
+        (bin_ / name).chmod(0o755)
+    for srv in ("olsrd", "dnsmasq", "dropbear"):
+        (initd / srv).write_text(f'#!/bin/sh\necho "{srv} $1" >> {calls}\n')
+        (initd / srv).chmod(0o755)
+    prepare = tmp_path / "upgrade_prepare.sh"
+    prepare.write_text('#!/bin/sh\nSERVICES="olsrd:olsrd dnsmasq dropbear"\n')
+    comm = tmp_path / "comm"
+    comm.write_text("upgraded\n")
+    script = tmp_path / "s.sh"
+    script.write_text(legacy_upgrade_script(str(bin_ / "fake-sysupgrade")))
+    env = {"PATH": f"{bin_}:/usr/bin:/bin", "FLEET_PID1_COMM": str(comm),
+           "FLEET_PREPARE": str(prepare), "FLEET_INITD": str(initd)}
+    subprocess.run(["sh", str(script)], env=env, capture_output=True, text=True, timeout=20)
+    log = calls.read_text().split("\n")
+    assert "olsrd stop" in log and "dnsmasq stop" in log and "killall -KILL olsrd" in log
+    assert not any(l.startswith("dropbear") for l in log)
+
+
+def test_low_memory_node_frees_ram_by_stopping_the_manager_then_upgrades(tmp_path):
+    """Field 2026-11-26: a hAP lite had 10896 kB free; free memory drifts. When short, stop
+    what AREDN's own upgrade stops anyway (the manager service), measure again, go on."""
+    t = make_topo()
+    mesh = FakeMesh(t)
+    mesh.mem, mesh.mgr_rss, mesh.mgr_frees = {"far1": 1500}, 3000, 3000
+    rel, store = release_and_store(tmp_path)
+    plan = plan_rollout(t, "hub", ["far1"])
+    dry = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, execute=False,
+                          sleep=no_sleep)).results[0]
+    assert dry.status == "would-upgrade" and any("manager service" in n for n in dry.notes)
+    assert not any(c.startswith("/etc/init.d/manager stop") for _, c in mesh.commands)  # dry run
+
+    rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, execute=True,
+                          sleep=no_sleep))
+    assert rep.results[0].status == "ok", rep.results[0].detail
+    cmds = [c for n, c in mesh.commands if n == "far1"]
+    stop = next(i for i, c in enumerate(cmds) if c.startswith("/etc/init.d/manager stop"))
+    assert stop < next(i for i, c in enumerate(cmds) if c.startswith("sha256sum"))
+    assert not any(k in c for c in cmds for k in ("babel stop", "dnsmasq", "uhttpd", "dropbear",
+                                                   "telnetd"))
+    assert not any("manager start" in c for c in cmds)       # it's rebooting into new firmware
+
+
+def test_still_short_after_freeing_puts_the_manager_back(tmp_path):
+    t = make_topo()
+    mesh = FakeMesh(t)
+    mesh.mem, mesh.mgr_rss, mesh.mgr_frees = {"far1": 1500}, 3000, 100   # estimate too hopeful
+    rel, store = release_and_store(tmp_path)
+    plan = plan_rollout(t, "hub", ["far1"])
+    rep = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, execute=True,
+                          sleep=no_sleep))
+    r = rep.results[0]
+    assert r.status == "failed" and "even after stopping" in r.detail
+    cmds = [c for n, c in mesh.commands if n == "far1"]
+    assert any("manager start" in c and "min_free_kbytes" in c for c in cmds)
+    assert "far1" not in mesh.uploaded
+    assert not any(_launch(c) for c in cmds if "mgr_stops=" not in c)
+
+
+def test_too_short_even_with_freeing_fails_in_the_dry_run(tmp_path):
+    t = make_topo()
+    mesh = FakeMesh(t)
+    mesh.mem, mesh.mgr_rss = {"far1": 500}, 200
+    rel, store = release_and_store(tmp_path)
+    plan = plan_rollout(t, "hub", ["far1"])
+    r = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, execute=False,
+                        sleep=no_sleep)).results[0]
+    assert r.status == "failed" and "still not enough" in r.detail
+
+
+def test_firmware_whose_upgrade_does_not_stop_the_manager_is_left_alone(tmp_path):
+    t = make_topo()
+    mesh = FakeMesh(t)
+    mesh.mem, mesh.mgr_rss, mesh.mgr_stops = {"far1": 1500}, 3000, 0
+    rel, store = release_and_store(tmp_path)
+    plan = plan_rollout(t, "hub", ["far1"])
+    r = run(run_rollout(plan, rel, store, mesh.connect, mesh.sysinfo, CFG, execute=False,
+                        sleep=no_sleep)).results[0]
+    assert r.status == "failed" and "not enough RAM" in r.detail

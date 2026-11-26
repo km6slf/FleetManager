@@ -38,6 +38,25 @@ SysinfoFetch = Callable[[str], Awaitable[dict[str, Any] | None]]
 Connector = Callable[[str], Awaitable[NodeSession]]
 
 REMOTE_IMAGE = "/tmp/aredn-fleet-upgrade.bin"
+# What the node's Firmware page does before an upload, and how it undoes it on failure.
+MINFREE_SAVE = "/tmp/min_free_kbytes"
+MINFREE_LOWER = (f"[ -f {MINFREE_SAVE} ] || cat /proc/sys/vm/min_free_kbytes > {MINFREE_SAVE}; "
+                 "echo 512 > /proc/sys/vm/min_free_kbytes; echo 3 > /proc/sys/vm/drop_caches")
+# Making room on low-memory nodes. Only what the node's own aredn_sysupgrade stops before
+# flashing (the manager service; stopping it cleanly also switches its hardware watchdog off
+# properly), a running iperf3 test, and the Firmware page's leftover downloads.
+FIRMWARE_TEMPS = "/tmp/firmwarefile /tmp/download.*"
+FREEABLE_PROBE = (
+    "echo mgr_stops=$(grep -c 'init.d/manager stop' /usr/local/bin/aredn_sysupgrade 2>/dev/null); "
+    "p=$(cat /var/run/manager.pid 2>/dev/null); "
+    "echo mgr_rss=$( [ -n \"$p\" ] && awk '/VmRSS/{print $2}' /proc/$p/status 2>/dev/null); "
+    "echo iperf_rss=$(for q in $(pidof iperf3); do awk '/VmRSS/{print $2}' /proc/$q/status; done "
+    "2>/dev/null | awk '{s+=$1} END {print s+0}'); "
+    f"echo tmp_kb=$(du -ck {FIRMWARE_TEMPS} 2>/dev/null | tail -1 | cut -f1)")
+FREE_MEMORY = (f"/etc/init.d/manager stop; killall iperf3 2>/dev/null; rm -f {FIRMWARE_TEMPS}; "
+               "sync; echo 3 > /proc/sys/vm/drop_caches")
+MINFREE_RESTORE = (f"[ -f {MINFREE_SAVE} ] && cat {MINFREE_SAVE} > /proc/sys/vm/min_free_kbytes; "
+                   f"rm -f {MINFREE_SAVE}")
 UPGRADE_LOG = "/tmp/aredn-fleet-upgrade.log"
 
 
@@ -49,7 +68,9 @@ class UpgradeConfig:
     up_timeout: float = 900       # how long to wait for it to come back
     neighbour_timeout: float = 300
     soak_seconds: float = 180     # TBD: field-tune on the lab mesh
-    ram_margin_kb: int = 4096
+    # Headroom beyond the image itself. The node's own Firmware page checks nothing; it drops
+    # the page cache and lowers vm.min_free_kbytes to 512 before an upload, as we do.
+    ram_margin_kb: int = 2048
     launch_check_seconds: float = 8
     backup_dir: Path | None = None   # save each node's config here before flashing
     rc_checks: bool = False          # target is the release candidate (or later)
@@ -138,6 +159,7 @@ class NodeUpgrade:
     access_points: set[str] | None = None             # this station's PtMP AP(s); None = unknown
     blocked: str | None = None        # refused before logging in (e.g. routing migration order)
     final_release: Callable[[str, str], str | None] | None = None   # (board, model) -> last release
+    _stopped_manager: bool = field(default=False, init=False, repr=False)
 
     async def run(self, execute: bool) -> NodeResult:
         res = NodeResult(self.node, to_version=self.release.version)
@@ -154,6 +176,40 @@ class NodeUpgrade:
                 await session.close()
             except Exception:  # noqa: BLE001 - node may already be rebooting
                 pass
+
+    async def _undo_prepare(self, s) -> None:
+        """Put back what was changed to make room (the upgrade didn't start)."""
+        cmd = MINFREE_RESTORE + ("; /etc/init.d/manager start" if self._stopped_manager else "")
+        try:
+            await s.run(cmd, timeout=30)
+        except Exception:  # noqa: BLE001 - best effort; a reboot resets both anyway
+            pass
+
+    async def _available_kb(self, s) -> int:
+        """Memory free for the image, after dropping the page cache as the Firmware page does
+        (harmless: cached file data is read again when needed). A copy left in /tmp by an
+        earlier failed run is overwritten, so its RAM counts as free."""
+        meminfo = (await s.run("sync; echo 3 > /proc/sys/vm/drop_caches; cat /proc/meminfo")).stdout
+        avail = _kb(meminfo, "MemAvailable:") or _kb(meminfo, "MemFree:")
+        try:
+            leftover = int((await s.run(f"wc -c < {REMOTE_IMAGE} 2>/dev/null")).stdout.strip() or 0)
+        except (ValueError, AttributeError):
+            leftover = 0
+        return avail + leftover // 1024 if avail else avail
+
+    async def _freeable_kb(self, s) -> int:
+        """About how much stopping what AREDN's upgrade stops anyway would free (0 if this
+        firmware's aredn_sysupgrade doesn't stop the manager itself)."""
+        out = (await s.run(FREEABLE_PROBE, timeout=20)).stdout
+        vals = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        def num(k: str) -> int:
+            try:
+                return int((vals.get(k) or "0").strip() or 0)
+            except ValueError:
+                return 0
+        if not num("mgr_stops"):
+            return 0
+        return num("mgr_rss") + num("iperf_rss") + num("tmp_kb")
 
     def _fail(self, res: NodeResult, why: str) -> NodeResult:
         res.status, res.detail = "failed", why
@@ -215,18 +271,27 @@ class NodeUpgrade:
             if why:
                 return self._fail(res, why)
 
-        meminfo = (await s.run("cat /proc/meminfo")).stdout
-        avail = _kb(meminfo, "MemAvailable:") or _kb(meminfo, "MemFree:")
-        # A copy left in /tmp by an earlier failed run is overwritten, so its RAM counts as free.
-        try:
-            leftover = int((await s.run(f"wc -c < {REMOTE_IMAGE} 2>/dev/null")).stdout.strip() or 0)
-        except (ValueError, AttributeError):
-            leftover = 0
-        if avail:
-            avail += leftover // 1024
         need = image.size // 1024 + self.cfg.ram_margin_kb + (256 if legacy else 0)
+        avail = await self._available_kb(s)
+        free_up = False
         if avail and avail < need:
-            return self._fail(res, f"not enough RAM for image in /tmp: {avail} kB free, need {need} kB")
+            # Short. A node's free memory drifts by a few MB, so see whether the things AREDN's
+            # own upgrade stops anyway would cover it (never the routing, web, SSH, DNS or
+            # telnet daemons: AREDN's hardware watchdog reboots the node if one disappears).
+            extra = 0 if legacy else await self._freeable_kb(s)
+            if avail + extra < need:
+                why = (f"not enough RAM for image in /tmp: {avail} kB free, need {need} kB")
+                if extra:
+                    why += (f" (stopping the node's manager service and leftover downloads "
+                            f"would free about {extra} kB more, still not enough)")
+                return self._fail(res, why)
+            free_up = True
+            res.notes.append(
+                f"Low on memory ({avail} kB free, needs {need} kB): before uploading, Fleet "
+                f"Manager stops the node's manager service (AREDN's own upgrade stops it just "
+                f"before flashing anyway), ends any iperf test and deletes leftover firmware "
+                f"downloads, freeing about {extra} kB. If the upgrade then can't start, the "
+                f"service is started again.")
 
         local = self.store.path_for(self.release, profile, image)
         if not local.exists():
@@ -251,11 +316,29 @@ class NodeUpgrade:
             except Exception as exc:  # noqa: BLE001
                 return self._fail(res, f"config backup failed ({exc}); not upgrading without one")
             self.log(self.node, "backup", path=res.backup)
+        # The Firmware page's own preparation: keep the kernel's free-memory reserve small
+        # while the image sits in RAM (saved first, put back if the upgrade doesn't start).
+        await s.run(MINFREE_LOWER)
+        if free_up:
+            self._stopped_manager = True
+            await s.run(FREE_MEMORY, timeout=60)
+            avail = await self._available_kb(s)
+            self.log(self.node, "freed-memory", available_kb=avail, need_kb=need)
+            if avail and avail < need:
+                await self._undo_prepare(s)
+                return self._fail(res, f"not enough RAM for image in /tmp even after stopping "
+                                       f"the manager service: {avail} kB free, need {need} kB "
+                                       f"(the service was started again; nothing was changed)")
         self.log(self.node, "upload", image=image.name)
-        await s.upload(local, REMOTE_IMAGE)
+        try:
+            await s.upload(local, REMOTE_IMAGE)
+        except Exception:
+            await self._undo_prepare(s)
+            raise
         sha = (await s.run(f"sha256sum {REMOTE_IMAGE}")).stdout.split()[:1]
         if sha != [image.sha256]:
             await s.run(f"rm -f {REMOTE_IMAGE}")
+            await self._undo_prepare(s)
             return self._fail(res, f"sha256 mismatch on node ({sha})")
 
         # aredn_sysupgrade checks the image itself, but we launch it detached
@@ -265,6 +348,7 @@ class NodeUpgrade:
         valid = _validation_ok(check.stdout)
         if valid is False:
             await s.run(f"rm -f {REMOTE_IMAGE}")
+            await self._undo_prepare(s)
             return self._fail(res, f"node rejected image: {check.stdout.strip()[:300]}")
 
         if legacy:
@@ -274,6 +358,7 @@ class NodeUpgrade:
                                f"/usr/local/bin/firmwarecheck.sh {REMOTE_IMAGE}")).stdout.strip()
             if chk:
                 await s.run(f"rm -f {REMOTE_IMAGE} {LEGACY_ARCHIVE}")
+                await self._undo_prepare(s)
                 return self._fail(res, f"node rejected image: {chk[:300]}")
 
         neighbours = _neighbours(before)
@@ -300,6 +385,7 @@ class NodeUpgrade:
                 await s.run(f"rm -f {REMOTE_IMAGE}", timeout=10)
             except Exception:  # noqa: BLE001
                 pass
+            await self._undo_prepare(s)
             if legacy and stopped:
                 why = (" (nothing was flashed; the node's services and settings were put back, "
                        "and its firmware is unchanged)")
@@ -482,11 +568,11 @@ def legacy_upgrade_script(sysupgrade_cmd: str) -> str:
     """
     return f"""#!/bin/sh
 lua -e 'require("aredn.info").set_nvram("nodeupgraded", "1")' || {{ echo "ERROR: couldn't set nodeupgraded"; exit 1; }}
-for S in $(sed -n 's/^SERVICES="\(.*\)"$/\1/p' /usr/local/bin/upgrade_prepare.sh 2>/dev/null); do
+for S in $(sed -n 's/^SERVICES="\\(.*\\)"$/\\1/p' ${{FLEET_PREPARE:-/usr/local/bin/upgrade_prepare.sh}} 2>/dev/null); do
   srv=${{S%%:*}}; d=$(echo "$S" | cut -d: -f2 -s)
   [ "$srv" = dropbear ] && continue
   [ -n "$d" ] && killall -KILL "$d" 2>/dev/null
-  [ -x "/etc/init.d/$srv" ] && "/etc/init.d/$srv" stop >/dev/null 2>&1
+  [ -x "${{FLEET_INITD:-/etc/init.d}}/$srv" ] && "${{FLEET_INITD:-/etc/init.d}}/$srv" stop >/dev/null 2>&1
 done
 echo 3 > /proc/sys/vm/drop_caches
 {sysupgrade_cmd} -f {LEGACY_ARCHIVE} -q {REMOTE_IMAGE}

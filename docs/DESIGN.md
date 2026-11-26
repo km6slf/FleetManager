@@ -56,6 +56,8 @@ Safe, bulk updating of AREDN nodes. Inspired by the "Fleet Manager … doesn't e
 
 ### Per-node upgrade steps
 1. Pre-flight: connect (trying each credential in turn), read the board name, current firmware and free RAM, resolve exactly one profile, and skip the node if it's already on the target version.
+   * **Memory:** measured after `sync; echo 3 > drop_caches`; needs the image plus 2 MB. Before the upload, the real run does what the node's Firmware page does (`firmware.ut`): saves `vm.min_free_kbytes` to `/tmp/min_free_kbytes`, sets it to 512 and drops caches; put back if the upgrade doesn't start. The page itself has no memory check.
+   * **Low-memory nodes** (field 2026-11-26: hAP lite, 10896 kB free for a 7.1 MB image, drifting between dry run and run): if short, and the node's `aredn_sysupgrade` stops the manager itself (`init.d/manager stop`), estimate what stopping it frees (its VmRSS, plus running iperf3, plus the page's leftover `/tmp/firmwarefile`, `/tmp/download.*`). Enough → the dry run notes it and the real run stops them before the upload, then measures again; still short → `manager start`, min_free restored, node unchanged. Never stopped early: babeld, uhttpd, dropbear, dnsmasq, telnetd — the manager's hardware watchdog (`hw_watchdog.uc`) reboots the node if one of its monitored daemons disappears; stopping the manager cleanly writes the watchdog's magic close. Older (Lua) firmware uses its own `upgrade_prepare.sh` list instead.
 2. Stream the image to `/tmp` over SSH (`cat >`, since there's no SFTP dependency), then run `sha256sum` on the node to confirm it.
 3. Run **`/usr/local/bin/aredn_sysupgrade`**. Plain `sysupgrade` must not be used on current AREDN.
 4. Wait for the node to drop and come back (timeout).
