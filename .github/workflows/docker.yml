@@ -43,6 +43,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Stamp the build number
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="0.1.0-dev.${GITHUB_SHA::7}"; fi
+          echo "BUILD = \"$v\"" > src/aredn_fleet/_build.py
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
@@ -98,6 +103,11 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+      - name: Stamp the build number
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="0.1.0-dev.${GITHUB_SHA::7}"; fi
+          echo "BUILD = \"$v\"" > src/aredn_fleet/_build.py
 
       - name: Start the Docker engine (installed on the runner, not always running)
         shell: pwsh

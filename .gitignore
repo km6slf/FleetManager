@@ -7,3 +7,4 @@ build/
 .pytest_cache/
 mesh*.json
 credentials*.json
+src/aredn_fleet/_build.py

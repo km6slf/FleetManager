@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .. import __version__, paths
+from .. import BUILD, __version__, paths
 from ..credentials import Credential, forget_password, store_password
 from ..discovery import crawl
 from ..firmware import Catalog, Channel, FirmwareStore, ReleaseIndex, match_profile, select_channels
@@ -160,15 +160,18 @@ def create_app(state: AppState | None = None, token: str | None = None) -> FastA
 
     def start(kind: str, title: str, mutating: bool, body, fp: str = "",
               dry_run: bool = False) -> dict[str, Any]:
+        async def stamped(job: Job):
+            job.log(f"Fleet Manager {BUILD}")  # every saved log says which build ran it
+            return await body(job)
         try:
-            return state.jobs.start(kind, title, mutating, body, fp, dry_run).summary()
+            return state.jobs.start(kind, title, mutating, stamped, fp, dry_run).summary()
         except JobBusy as exc:
             raise HTTPException(409, str(exc)) from exc
 
     # ------------------------------------------------------------ info
     @app.get("/api/info")
     async def info():
-        return {"version": __version__, "portable": paths.portable_root() is not None,
+        return {"version": BUILD, "portable": paths.portable_root() is not None,
                 "config_dir": str(state.config_dir), "firmware_dir": str(state.fw_dir),
                 "active_job": (j.summary() if (j := state.jobs.active_mutating()) else None)}
 

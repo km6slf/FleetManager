@@ -149,7 +149,7 @@ def test_firmware_local_and_job_flow(client, tmp_path):
         time.sleep(0.05)
     assert j["status"] == "done"
     msgs = [e["msg"] for e in j["events"]]
-    assert "Dry run" in msgs[0] and any("far1: failed connect" in m for m in msgs)
+    assert msgs[0].startswith("Fleet Manager ") and "Dry run" in msgs[1] and any("far1: failed connect" in m for m in msgs)
     assert client.get("/api/jobs").json()["jobs"][0]["id"] == job["id"]
 
 

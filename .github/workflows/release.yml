@@ -30,6 +30,7 @@ jobs:
           if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart("v") }
           else { $v = "0.1.0-dev." + "${{ github.sha }}".Substring(0, 7) }
           "version=$v" >> $env:GITHUB_OUTPUT
+          "BUILD = `"$v`"" | Set-Content -Encoding utf8 src/aredn_fleet/_build.py
 
       - name: Install
         run: |

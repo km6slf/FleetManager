@@ -59,6 +59,8 @@ Download from [Releases](https://github.com/km6slf/FleetManager/releases): a num
 - **`AREDN-Fleet-Manager-<version>-setup.exe`**: installs for your user (no admin rights), adds a Start-menu shortcut.
 - **`AREDN-Fleet-Manager-<version>-portable-win64.zip`**: no install. Unzip anywhere (even a USB stick) and run `AREDN-Fleet-Manager.exe`. Everything stays in a `data` folder beside it.
 
+The build you're running is shown at the top right of the window (for example `v0.1.0-dev.aa17f60`) and on the first line of every job log. What changed in each build is in [CHANGELOG.md](CHANGELOG.md).
+
 Both use the Microsoft Edge WebView2 runtime, which Windows 10 and 11 already have.
 
 ### Docker (Linux, Raspberry Pi, Windows)
@@ -97,6 +99,8 @@ By default the web UI only answers on the machine running Docker. To use it from
 docker compose pull
 docker compose up -d
 ```
+This fetches the newest image for your tag: `dev` follows every build of `main` (the default for now), `latest` follows releases. Docker doesn't update a running container on its own; run these two commands (or a tool like Watchtower) to pick up a new build. The build number shows in the web UI and on the first line of every job log; see [CHANGELOG.md](CHANGELOG.md) for what changed.
+
 Everything Fleet Manager keeps (settings, saved passwords, pinned SSH host keys, configuration backups, downloaded firmware, job logs) is in the `fleet-data` volume, so upgrades keep it. To go back to an earlier version, set `FLEET_TAG` to it and run the same two commands.
 
 ### Without Compose
